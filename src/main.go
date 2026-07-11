@@ -279,9 +279,12 @@ func handleDevices(w http.ResponseWriter, r *http.Request) {
 
 // Заполнение топиков нулями для инициализации состояния в Home Assistant
 func initializeSensorsWithZeros(d UserDevice, model ControllerModel) {
+	// СТРОГАЯ ЗАЩИТА: Проверяем, что клиент вообще существует и подключен
 	if mqttClient == nil || !mqttClient.IsConnected() {
+		log.Printf("[%s] Предупреждение: Попытка отправить нули до инициализации MQTT", d.Name)
 		return
 	}
+
 	for _, reg := range model.Registers {
 		stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
 		mqttClient.Publish(stateTopic, 0, false, "0.00")
@@ -301,6 +304,10 @@ func startDevicePolling(d UserDevice) {
 
 	// Отправка MQTT Discovery
 	for _, reg := range model.Registers {
+		if mqttClient == nil {
+			continue
+		}
+
 		discoveryTopic := fmt.Sprintf("homeassistant/sensor/%s/%s/config", d.ID, reg.ID)
 		stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
 
@@ -326,8 +333,10 @@ func startDevicePolling(d UserDevice) {
 		mqttClient.Publish(discoveryTopic, 1, true, jsonData).Wait()
 	}
 
-	// Инициализируем сущности нулями, чтобы убрать статус "Неизвестно"
-	initializeSensorsWithZeros(d, model)
+	// Инициализируем сущности нулями только если MQTT подключен
+	if mqttClient != nil && mqttClient.IsConnected() {
+		initializeSensorsWithZeros(d, model)
+	}
 
 	stopChan := make(chan struct{})
 
@@ -339,6 +348,7 @@ func startDevicePolling(d UserDevice) {
 	mu.Unlock()
 
 	go func() {
+		// Безопасный отлов паник
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("[%s] Внутренняя ошибка (паника) предотвращена: %v", d.Name, r)
@@ -350,22 +360,22 @@ func startDevicePolling(d UserDevice) {
 			Timeout: 2 * time.Second,
 		})
 		if err != nil {
-			log.Printf("[%s] Ошибка создания клиента: %v", d.Name, err)
+			log.Printf("[%s] Ошибка создания клиента Modbus: %v", d.Name, err)
 			return
 		}
 
 		communicationTimeout := time.Duration(d.TimeoutSec) * time.Second
 		lastSuccessfulRead := time.Now()
 
-		// Начинаем сразу со статуса true, чтобы первый же сбой Modbus сгенерировал нули
+		// Начинаем со статуса true, чтобы первый же пропуск тикера корректно обработал отсутствие связи
 		linkDown := true
 
 		if err := client.Open(); err == nil {
 			linkDown = false
 			log.Printf("[%s] Успешное первое подключение к Modbus TCP.", d.Name)
 		} else {
-			log.Printf("[%s] Контроллер недоступен при старте. Будут отправлены нули.", d.Name)
-			initializeSensorsWithZeros(d, model)
+			log.Printf("[%s] Контроллер недоступен при старте. Будет отправлен повторный пул нулей.", d.Name)
+			// Убрали отсюда прямой вызов initializeSensorsWithZeros, так как он выполнится на первом тике
 		}
 
 		ticker := time.NewTicker(5 * time.Second)
@@ -375,6 +385,7 @@ func startDevicePolling(d UserDevice) {
 		for {
 			select {
 			case <-ticker.C:
+				// Если MQTT упал или реконнектится, мягко пропускаем итерацию без паники
 				if mqttClient == nil || !mqttClient.IsConnected() {
 					continue
 				}
