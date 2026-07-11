@@ -4,6 +4,7 @@ import subprocess
 import logging
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.components.frontend import async_register_panel, async_remove_panel
 
 _LOGGER = logging.getLogger(__name__)
 DOMAIN = "gpu_modbus"
@@ -28,7 +29,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         os.chmod(bin_path, 0o755)
     except Exception as e:
-        _LOGGER.warning(f"Не удалось выставить права +x на бинарник: {e}")
+        _LOGGER.warning(f"Не удалось установить права +x на бинарник: {e}")
 
     env = os.environ.copy()
     env["CONTROLLERS_PATH"] = os.path.join(current_dir, "controllers")
@@ -43,10 +44,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         stderr=subprocess.DEVNULL
     )
 
+    # --- ДОБАВЛЕНИЕ НА БОКОВУЮ ПАНЕЛЬ ---
+    # Мы регистрируем iframe, который откроет веб-морду Go (порт 8080) прямо внутри Home Assistant
+    async_register_panel(
+        hass,
+        frontend_url_path="gpu_modbus_panel",       # URL-путь внутри HA
+        webcomponent_name="ha-panel-iframe",        # Тип панели (встроенный iframe)
+        sidebar_title="Панель ГПУ",                 # Имя кнопки на боковой панели
+        sidebar_icon="mdi:engine-outline",          # Иконка (промышленный мотор/двигатель)
+        config={"url": "http://localhost:8080"},    # Ссылка на локальный порт Go
+        require_admin=False                         # Доступно всем или только админам (True)
+    )
+
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     global go_process
+    
+    # --- УДАЛЕНИЕ С БОКОВОЙ ПАНЕЛИ ---
+    # Если пользователь удалит интеграцию, кнопка сбоку тоже пропадет
+    async_remove_panel(hass, "gpu_modbus_panel")
+
     if go_process:
         _LOGGER.info("Остановка Go-моста ГПУ...")
         go_process.terminate()
