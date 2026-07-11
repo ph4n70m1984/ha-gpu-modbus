@@ -1,0 +1,61 @@
+{
+  "model_id": "woodward_easygen",
+  "name": "Woodward easYgen 3000 Series",
+  "manufacturer": "Woodward",
+  "registers": [
+    {
+      "name": "Частота генератора",
+      "id": "gen_frequency",
+      "address": 500,
+      "type": "holding",
+      "unit": "Hz",
+      "device_class": "frequency",
+      "scale": 0.01
+    },
+    {
+      "name": "Напряжение генератора L1-L2",
+      "id": "gen_voltage_l1_l2",
+      "address": 502,
+      "type": "holding",
+      "unit": "V",
+      "device_class": "voltage",
+      "scale": 1.0
+    },
+    {
+      "name": "Активная мощность генератора",
+      "id": "gen_active_power",
+      "address": 514,
+      "type": "holding",
+      "unit": "kW",
+      "device_class": "power",
+      "scale": 1.0
+    },
+    {
+      "name": "Скорость вращения двигателя",
+      "id": "engine_speed",
+      "address": 580,
+      "type": "holding",
+      "unit": "RPM",
+      "device_class": "",
+      "scale": 1.0
+    },
+    {
+      "name": "Температура масла",
+      "id": "oil_temp",
+      "address": 592,
+      "type": "holding",
+      "unit": "°C",
+      "device_class": "temperature",
+      "scale": 1.0
+    },
+    {
+      "name": "Наработка двигателя (Моточасы)",
+      "id": "engine_hours",
+      "address": 600,
+      "type": "holding",
+      "unit": "h",
+      "device_class": "duration",
+      "scale": 0.1
+    }
+  ]
+}

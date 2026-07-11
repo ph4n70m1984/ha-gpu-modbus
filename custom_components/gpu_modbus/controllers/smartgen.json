@@ -1,0 +1,61 @@
+{
+  "model_id": "smartgen",
+  "name": "SmartGen HGM95xx Series",
+  "manufacturer": "SmartGen",
+  "registers": [
+    {
+      "name": "Обороты двигателя",
+      "id": "engine_rpm",
+      "address": 1024,
+      "type": "input",
+      "unit": "RPM",
+      "device_class": "",
+      "scale": 1.0
+    },
+    {
+      "name": "Температура антифриза",
+      "id": "coolant_temp",
+      "address": 1025,
+      "type": "input",
+      "unit": "°C",
+      "device_class": "temperature",
+      "scale": 1.0
+    },
+    {
+      "name": "Давление масла",
+      "id": "oil_pressure",
+      "address": 1026,
+      "type": "input",
+      "unit": "kPa",
+      "device_class": "pressure",
+      "scale": 1.0
+    },
+    {
+      "name": "Напряжение аккумулятора",
+      "id": "battery_voltage",
+      "address": 1029,
+      "type": "input",
+      "unit": "V",
+      "device_class": "voltage",
+      "scale": 0.1
+    },
+    {
+      "name": "Активная мощность общая",
+      "id": "active_power",
+      "address": 1039,
+      "type": "input",
+      "unit": "kW",
+      "device_class": "power",
+      "scale": 1.0
+    },
+    {
+      "name": "Коэффициент мощности (Cos φ)",
+      "id": "power_factor",
+      "address": 1043,
+      "type": "input",
+      "unit": "",
+      "device_class": "",
+      "scale": 0.01
+    }
+  ]
+}
