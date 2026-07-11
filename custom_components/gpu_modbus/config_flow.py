@@ -15,18 +15,21 @@ class GpuModbusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="single_instance_allowed")
 
         if user_input is not None:
-            # Сохраняем введенный пользователем URL в конфигурацию интеграции
+            # Сохраняем введенные пользователем настройки URL и MQTT
             return self.async_create_entry(title="ГПУ Modbus Мост", data=user_input)
 
-        # Форма запроса URL у пользователя (с дефолтным значением)
+        # Форма запроса параметров у пользователя
         data_schema = vol.Schema({
-            vol.Required("web_url", default="http://localhost:8080"): str
+            vol.Required("web_url", default="http://localhost:8080"): str,
+            vol.Required("mqtt_broker", default="127.0.0.1:1883"): str,
+            vol.Optional("mqtt_user", default=""): str,
+            vol.Optional("mqtt_password", default=""): str,
         })
 
         return self.async_show_form(
             step_id="user", 
             data_schema=data_schema,
             description_placeholders={
-                "info": "Укажите полный URL для доступа к веб-интерфейсу настройки (например, http://192.168.1.50:8080, если HA работает в Docker)."
+                "info": "Настройте параметры MQTT-брокера и доступ к веб-панели."
             }
         )

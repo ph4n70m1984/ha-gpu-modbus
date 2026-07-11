@@ -31,12 +31,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as e:
         _LOGGER.warning(f"Не удалось установить права +x на бинарник: {e}")
 
+    # Подготовка переменных окружения для Go-процесса
     env = os.environ.copy()
     env["CONTROLLERS_PATH"] = os.path.join(current_dir, "controllers")
     env["WEB_PATH"] = os.path.join(current_dir, "web")
     env["DATA_PATH"] = os.path.join(hass.config.config_dir, "gpu_modbus_data")
     
-    _LOGGER.info(f"Запуск Go-моста ГПУ: {bin_path}")
+    # --- НАСТРОЙКИ MQTT ---
+    mqtt_broker = entry.data.get("mqtt_broker", "127.0.0.1:1883")
+    if not mqtt_broker.startswith("tcp://") and not mqtt_broker.startswith("ws://"):
+        mqtt_broker = f"tcp://{mqtt_broker}"
+        
+    env["MQTT_BROKER"] = mqtt_broker
+    env["MQTT_USER"] = entry.data.get("mqtt_user", "")
+    env["MQTT_PASSWORD"] = entry.data.get("mqtt_password", "")
+    
+    _LOGGER.info(f"Запуск Go-моста ГПУ: {bin_path} (MQTT: {mqtt_broker})")
+    
     go_process = subprocess.Popen(
         [bin_path],
         env=env,
@@ -44,10 +55,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         stderr=subprocess.DEVNULL
     )
 
-    # Получаем URL из настроек пользователя (fallback на localhost, если ключ отсутствует)
+    # Регистрация боковой панели
     web_url = entry.data.get("web_url", "http://localhost:8080")
-
-    # Регистрируем боковую панель с указанным IP/адресом
     try:
         frontend.async_register_built_in_panel(
             hass,
