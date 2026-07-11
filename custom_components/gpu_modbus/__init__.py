@@ -4,6 +4,7 @@ import subprocess
 import logging
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.components import frontend
 
 _LOGGER = logging.getLogger(__name__)
 DOMAIN = "gpu_modbus"
@@ -43,30 +44,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         stderr=subprocess.DEVNULL
     )
 
-    # --- ИСПРАВЛЕННОЕ ДОБАВЛЕНИЕ НА БОКОВУЮ ПАНЕЛЬ ---
-    # Проверяем, загружен ли компонент frontend в Home Assistant
-    if "frontend" in hass.config.components:
-        _LOGGER.info("Регистрация панели ГПУ на боковой панели")
-        hass.components.frontend.async_register_panel(
-            frontend_url_path="gpu_modbus_panel",       # URL-путь внутри HA
-            webcomponent_name="ha-panel-iframe",        # Тип панели (встроенный iframe)
-            sidebar_title="Панель ГПУ",                 # Имя кнопки на боковой панели
-            sidebar_icon="mdi:engine-outline",          # Иконка
-            config={"url": "http://localhost:8080"},    # Ссылка на локальный порт Go
-            require_admin=False                         # Доступно всем пользователям
+    # Получаем URL из настроек пользователя (fallback на localhost, если ключ отсутствует)
+    web_url = entry.data.get("web_url", "http://localhost:8080")
+
+    # Регистрируем боковую панель с указанным IP/адресом
+    try:
+        frontend.async_register_built_in_panel(
+            hass,
+            component_name="iframe",
+            sidebar_title="Панель ГПУ",
+            sidebar_icon="mdi:engine-outline",
+            frontend_url_path="gpu_modbus_panel",
+            config={"url": web_url},
+            require_admin=False
         )
+        _LOGGER.info(f"Панель ГПУ зарегистрирована по адресу: {web_url}")
+    except Exception as e:
+        _LOGGER.error(f"Ошибка регистрации боковой панели: {e}")
 
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     global go_process
     
-    # --- ИСПРАВЛЕННОЕ УДАЛЕНИЕ С БОКОВОЙ ПАНЕЛИ ---
-    if "frontend" in hass.config.components:
-        try:
-            hass.components.frontend.async_remove_panel("gpu_modbus_panel")
-        except Exception as e:
-            _LOGGER.error(f"Ошибка при удалении панели ГПУ: {e}")
+    try:
+        frontend.async_remove_panel(hass, "gpu_modbus_panel")
+    except Exception as e:
+        _LOGGER.error(f"Ошибка при удалении панели ГПУ: {e}")
 
     if go_process:
         _LOGGER.info("Остановка Go-моста ГПУ...")
