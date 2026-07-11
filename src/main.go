@@ -317,7 +317,7 @@ func startDevicePolling(d UserDevice) {
 		d.TimeoutSec = 10
 	}
 
-	// Ждем до 5 секунд, если брокер MQTT еще подключается (защита при холодном рестарте HA)
+	// Ждем до 5 секунд, если брокер MQTT еще подключается
 	for i := 0; i < 5; i++ {
 		if mqttClient != nil && mqttClient.IsConnected() {
 			break
@@ -330,7 +330,6 @@ func startDevicePolling(d UserDevice) {
 		discoveryTopic := fmt.Sprintf("homeassistant/sensor/%s/%s/config", d.ID, reg.ID)
 		stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
 
-		// Умная нормализация регистра для классов давления pressure
 		unit := reg.Unit
 		if reg.DeviceClass == "pressure" {
 			checkUnit := strings.ToLower(reg.Unit)
@@ -377,30 +376,12 @@ func startDevicePolling(d UserDevice) {
 			}
 		}()
 
-		client, err := modbus.NewClient(&modbus.ClientConfiguration{
-			URL:     "tcp://" + d.Address,
-			Timeout: 2 * time.Second,
-		})
-		if err != nil {
-			log.Printf("[%s] Ошибка создания клиента Modbus: %v", d.Name, err)
-			return
-		}
-
 		communicationTimeout := time.Duration(d.TimeoutSec) * time.Second
 		lastSuccessfulRead := time.Now()
 		linkDown := true
 
-		// Первичная попытка подключения
-		if err := client.Open(); err == nil {
-			linkDown = false
-			log.Printf("[%s] Успешное первое подключение к Modbus TCP.", d.Name)
-		} else {
-			log.Printf("[%s] Контроллер недоступен при старте. Статус будет обработан на первом тике таймера.", d.Name)
-		}
-
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
-		defer client.Close()
 
 		for {
 			select {
@@ -409,15 +390,29 @@ func startDevicePolling(d UserDevice) {
 					continue
 				}
 
-				// ИСПРАВЛЕНИЕ ЗДЕСЬ: Строго проверяем, удалось ли открыть сокет
-				err := client.Open()
-				deviceReadError := false
+				// ИСПРАВЛЕНИЕ: Создаем и открываем клиент Modbus строго локально внутри итерации тика
+				client, err := modbus.NewClient(&modbus.ClientConfiguration{
+					URL:     "tcp://" + d.Address,
+					Timeout: 2 * time.Second,
+				})
 
 				if err != nil {
-					// Если связи нет, мы просто отмечаем ошибку и НЕ идем читать регистры
+					// Ошибка конфигурации адреса (ноль паник)
+					if !linkDown && time.Since(lastSuccessfulRead) > communicationTimeout {
+						log.Printf("[%s] Авария связи (ошибка конфигурации)! Сброс в 0.", d.Name)
+						linkDown = true
+						initializeSensorsWithZeros(d, model)
+					}
+					continue
+				}
+
+				deviceReadError := false
+
+				// Пытаемся открыть сокет
+				if err := client.Open(); err != nil {
 					deviceReadError = true
 				} else {
-					// Связь есть, можно безопасно читать
+					// Если сокет открылся — читаем регистры
 					for _, reg := range model.Registers {
 						var raw uint16
 						var readErr error
@@ -447,9 +442,12 @@ func startDevicePolling(d UserDevice) {
 						val := float64(raw) * reg.Scale
 						safeMqttPublish(stateTopic, 0, false, fmt.Sprintf("%.2f", val))
 					}
+
+					// Явно закрываем успешно открытый клиент
+					client.Close()
 				}
 
-				// Обработка таймаута: если чтение не удалось (или сокет не открылся) и мы еще не в статусе "Авария"
+				// Обработка таймаута при любой ошибке (не открылся сокет или ошибка чтения регистра)
 				if deviceReadError && !linkDown {
 					if time.Since(lastSuccessfulRead) > communicationTimeout {
 						log.Printf("[%s] Авария связи! Нет данных > %v. Сброс в 0.", d.Name, communicationTimeout)
