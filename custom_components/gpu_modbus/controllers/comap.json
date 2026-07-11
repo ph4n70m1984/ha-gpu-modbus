@@ -1,0 +1,57 @@
+{
+  "model_id": "comap_inteligen",
+  "name": "ComAp InteliGen / InteliSys Series",
+  "manufacturer": "ComAp",
+  "registers": [
+    {
+      "name": "Давление масла",
+      "id": "oil_pressure",
+      "address": 40001,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "kPa",
+      "device_class": "pressure",
+      "scale": 1.0
+    },
+    {
+      "name": "Ток фазы А",
+      "id": "current_a",
+      "address": 40010,
+      "type": "holding",
+      "bitrate": 32,
+      "unit": "A",
+      "device_class": "current",
+      "scale": 1.0
+    },
+    {
+      "name": "Ток фазы B",
+      "id": "current_b",
+      "address": 40012,
+      "type": "holding",
+      "bitrate": 32,
+      "unit": "A",
+      "device_class": "current",
+      "scale": 1.0
+    },
+    {
+      "name": "Ток фазы C",
+      "id": "current_c",
+      "address": 40014,
+      "type": "holding",
+      "bitrate": 32,
+      "unit": "A",
+      "device_class": "current",
+      "scale": 1.0
+    },
+    {
+      "name": "Активная мощность",
+      "id": "active_power",
+      "address": 40020,
+      "type": "holding",
+      "bitrate": 32,
+      "unit": "kW",
+      "device_class": "power",
+      "scale": 1.0
+    }
+  ]
+}
