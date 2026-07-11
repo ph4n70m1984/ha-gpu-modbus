@@ -1,0 +1,15 @@
+
+secrets.yaml
+.storage/
+*.log
+
+.secrets
+.env
+
+# Локальные пароли и ключи
+esp32/src/config.h
+esp32/src/secrets.h
+
+.pio/
+.vscode/
+src/

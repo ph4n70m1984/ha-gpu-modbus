@@ -1,0 +1,10 @@
+{
+  "model_id": "deif_agc150",
+  "name": "DEIF AGC 150",
+  "manufacturer": "DEIF",
+  "registers": [
+    {"name": "Активная мощность", "id": "active_power", "address": 500, "type": "holding", "unit": "kW", "device_class": "power", "scale": 0.1},
+    {"name": "Обороты двигателя", "id": "engine_rpm", "address": 512, "type": "holding", "unit": "RPM", "device_class": "", "scale": 1.0},
+    {"name": "Давление масла", "id": "oil_pressure", "address": 520, "type": "holding", "unit": "Bar", "device_class": "pressure", "scale": 0.01}
+  ]
+}

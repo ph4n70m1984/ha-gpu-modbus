@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Управление ГПУ Мостами</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; color: #333; background: #fafafa; }
+        .card { border: 1px solid #ddd; padding: 20px; border-radius: 8px; margin-bottom: 20px; background: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        label { display: block; margin-top: 12px; font-weight: bold; }
+        input, select { width: 100%; padding: 10px; margin-top: 6px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+        button { background: #03a9f4; color: white; border: none; padding: 12px 24px; margin-top: 18px; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: bold; }
+        button:hover { background: #0288d1; }
+        ul { list-style: none; padding: 0; }
+        li { background: #f9f9f9; padding: 12px; border: 1px solid #eee; margin-bottom: 6px; border-radius: 4px; }
+        .btn-link { color: white; text-decoration: none; padding: 10px 20px; border-radius: 4px; font-weight: bold; display: inline-block; }
+    </style>
+</head>
+<body>
+    <h1>Панель управления ГПУ (Modbus-to-MQTT)</h1>
+
+    <div class="card">
+        <h2>Добавить новую ГПУ</h2>
+        <form id="addForm">
+            <label>Название установки:</label>
+            <input type="text" id="name" required placeholder="ГПУ-1">
+
+            <label>IP-адрес и порт контроллера:</label>
+            <input type="text" id="address" required placeholder="192.168.1.100:502">
+
+            <label>Модель контроллера:</label>
+            <select id="model" required></select>
+
+            <label>Таймаут потери связи (в секундах, после чего слать 0):</label>
+            <input type="number" id="timeout_sec" required value="10" min="2" max="300">
+
+            <button type="submit">Добавить в Home Assistant</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>Текущие установки в работе</h2>
+        <ul id="deviceList"></ul>
+    </div>
+
+    <div class="card" style="background: #fffde7; border-color: #fff59d; text-align: center;">
+        <h3>Понравился проект? Поддержите разработку!</h3>
+        <p>Проект является полностью бесплатным и открытым. Ваши донаты помогают развивать интеграцию.</p>
+        <div style="margin-top: 15px;">
+            <a href="https://boosty.to/your_profile" target="_blank" class="btn-link" style="background: #ff5722; margin-right: 10px;">Поддержать на Boosty</a>
+            <a href="https://github.com/sponsors/your_profile" target="_blank" class="btn-link" style="background: #24292e;">GitHub Sponsors</a>
+        </div>
+    </div>
+
+    <script>
+        fetch('/api/models')
+            .then(res => res.json())
+            .then(models => {
+                const select = document.getElementById('model');
+                models.forEach(m => {
+                    const opt = document.createElement('option');
+                    opt.value = m.model_id;
+                    opt.textContent = `${m.manufacturer} - ${m.name}`;
+                    select.appendChild(opt);
+                });
+            });
+
+        function loadDevices() {
+            fetch('/api/devices')
+                .then(res => res.json())
+                .then(devices => {
+                    const list = document.getElementById('deviceList');
+                    list.innerHTML = devices.length === 0 ? '<li>Нет активных установок</li>' : '';
+                    devices.forEach(d => {
+                        const li = document.createElement('li');
+                        li.innerHTML = `<div><strong>${d.name}</strong> (${d.address})<br><small>Контроллер: ${d.model_id} | Таймаут: ${d.timeout_sec}с</small></div>`;
+                        list.appendChild(li);
+                    });
+                });
+        }
+
+        document.getElementById('addForm').onsubmit = function(e) {
+            e.preventDefault();
+            const data = {
+                name: document.getElementById('name').value,
+                address: document.getElementById('address').value,
+                model_id: document.getElementById('model').value,
+                timeout_sec: parseInt(document.getElementById('timeout_sec').value, 10)
+            };
+
+            fetch('/api/devices', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data)
+            }).then(() => {
+                loadDevices();
+                document.getElementById('addForm').reset();
+                document.getElementById('timeout_sec').value = "10";
+            });
+        };
+
+        loadDevices();
+    </script>
+</body>
+</html>
