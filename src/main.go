@@ -335,9 +335,9 @@ func startDevicePolling(d UserDevice) {
 		if reg.DeviceClass == "pressure" {
 			checkUnit := strings.ToLower(reg.Unit)
 			if checkUnit == "kpa" {
-				unit = "kPa" // Валидно для Home Assistant
+				unit = "kPa"
 			} else if checkUnit == "bar" {
-				unit = "bar" // Валидно для Home Assistant
+				unit = "bar"
 			}
 		}
 
@@ -390,6 +390,7 @@ func startDevicePolling(d UserDevice) {
 		lastSuccessfulRead := time.Now()
 		linkDown := true
 
+		// Первичная попытка подключения
 		if err := client.Open(); err == nil {
 			linkDown = false
 			log.Printf("[%s] Успешное первое подключение к Modbus TCP.", d.Name)
@@ -408,38 +409,47 @@ func startDevicePolling(d UserDevice) {
 					continue
 				}
 
-				_ = client.Open()
+				// ИСПРАВЛЕНИЕ ЗДЕСЬ: Строго проверяем, удалось ли открыть сокет
+				err := client.Open()
 				deviceReadError := false
 
-				for _, reg := range model.Registers {
-					var raw uint16
-					var err error
-					if reg.Type == "input" {
-						raw, err = client.ReadRegister(reg.Address, modbus.INPUT_REGISTER)
-					} else {
-						raw, err = client.ReadRegister(reg.Address, modbus.HOLDING_REGISTER)
-					}
+				if err != nil {
+					// Если связи нет, мы просто отмечаем ошибку и НЕ идем читать регистры
+					deviceReadError = true
+				} else {
+					// Связь есть, можно безопасно читать
+					for _, reg := range model.Registers {
+						var raw uint16
+						var readErr error
 
-					stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
-
-					if err != nil {
-						deviceReadError = true
-						if linkDown {
-							safeMqttPublish(stateTopic, 0, false, "0.00")
+						if reg.Type == "input" {
+							raw, readErr = client.ReadRegister(reg.Address, modbus.INPUT_REGISTER)
+						} else {
+							raw, readErr = client.ReadRegister(reg.Address, modbus.HOLDING_REGISTER)
 						}
-						continue
-					}
 
-					lastSuccessfulRead = time.Now()
-					if linkDown {
-						log.Printf("[%s] Связь с ГПУ восстановлена!", d.Name)
-						linkDown = false
-					}
+						stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
 
-					val := float64(raw) * reg.Scale
-					safeMqttPublish(stateTopic, 0, false, fmt.Sprintf("%.2f", val))
+						if readErr != nil {
+							deviceReadError = true
+							if !linkDown {
+								safeMqttPublish(stateTopic, 0, false, "0.00")
+							}
+							continue
+						}
+
+						lastSuccessfulRead = time.Now()
+						if linkDown {
+							log.Printf("[%s] Связь с ГПУ восстановлена!", d.Name)
+							linkDown = false
+						}
+
+						val := float64(raw) * reg.Scale
+						safeMqttPublish(stateTopic, 0, false, fmt.Sprintf("%.2f", val))
+					}
 				}
 
+				// Обработка таймаута: если чтение не удалось (или сокет не открылся) и мы еще не в статусе "Авария"
 				if deviceReadError && !linkDown {
 					if time.Since(lastSuccessfulRead) > communicationTimeout {
 						log.Printf("[%s] Авария связи! Нет данных > %v. Сброс в 0.", d.Name, communicationTimeout)
