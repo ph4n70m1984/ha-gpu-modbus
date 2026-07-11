@@ -185,7 +185,14 @@ func handleGetModels(w http.ResponseWriter, r *http.Request) {
 
 func handleDevices(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 
 	if r.Method == http.MethodGet {
 		mu.RLock()
@@ -277,17 +284,25 @@ func handleDevices(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Заполнение топиков нулями для инициализации состояния в Home Assistant
-func initializeSensorsWithZeros(d UserDevice, model ControllerModel) {
-	// СТРОГАЯ ЗАЩИТА: Проверяем, что клиент вообще существует и подключен
+// Безопасная отправка публикаций в MQTT с изоляцией паник внутренней библиотеки
+func safeMqttPublish(topic string, qos byte, retained bool, payload interface{}) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[MQTT] Ошибка публикации в топик %s (паника предотвращена): %v", topic, r)
+		}
+	}()
+
 	if mqttClient == nil || !mqttClient.IsConnected() {
-		log.Printf("[%s] Предупреждение: Попытка отправить нули до инициализации MQTT", d.Name)
 		return
 	}
+	mqttClient.Publish(topic, qos, retained, payload)
+}
 
+// Заполнение топиков нулями для сброса состояния датчиков в Home Assistant
+func initializeSensorsWithZeros(d UserDevice, model ControllerModel) {
 	for _, reg := range model.Registers {
 		stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
-		mqttClient.Publish(stateTopic, 0, false, "0.00")
+		safeMqttPublish(stateTopic, 0, false, "0.00")
 	}
 }
 
@@ -302,18 +317,28 @@ func startDevicePolling(d UserDevice) {
 		d.TimeoutSec = 10
 	}
 
+	// Ждем до 5 секунд, если брокер MQTT еще подключается (защита при холодном рестарте HA)
+	for i := 0; i < 5; i++ {
+		if mqttClient != nil && mqttClient.IsConnected() {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+
 	// Отправка MQTT Discovery
 	for _, reg := range model.Registers {
-		if mqttClient == nil {
-			continue
-		}
-
 		discoveryTopic := fmt.Sprintf("homeassistant/sensor/%s/%s/config", d.ID, reg.ID)
 		stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
 
+		// Умная нормализация регистра для классов давления pressure
 		unit := reg.Unit
 		if reg.DeviceClass == "pressure" {
-			unit = strings.ToLower(reg.Unit)
+			checkUnit := strings.ToLower(reg.Unit)
+			if checkUnit == "kpa" {
+				unit = "kPa" // Валидно для Home Assistant
+			} else if checkUnit == "bar" {
+				unit = "bar" // Валидно для Home Assistant
+			}
 		}
 
 		payload := HADiscoveryPayload{
@@ -330,13 +355,11 @@ func startDevicePolling(d UserDevice) {
 			},
 		}
 		jsonData, _ := json.Marshal(payload)
-		mqttClient.Publish(discoveryTopic, 1, true, jsonData).Wait()
+		safeMqttPublish(discoveryTopic, 1, true, jsonData)
 	}
 
-	// Инициализируем сущности нулями только если MQTT подключен
-	if mqttClient != nil && mqttClient.IsConnected() {
-		initializeSensorsWithZeros(d, model)
-	}
+	// Инициализируем сущности стартовыми нулями
+	initializeSensorsWithZeros(d, model)
 
 	stopChan := make(chan struct{})
 
@@ -348,10 +371,9 @@ func startDevicePolling(d UserDevice) {
 	mu.Unlock()
 
 	go func() {
-		// Безопасный отлов паник
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("[%s] Внутренняя ошибка (паника) предотвращена: %v", d.Name, r)
+				log.Printf("[%s] Фоновый поллер опроса остановлен (паника предотвращена): %v", d.Name, r)
 			}
 		}()
 
@@ -366,16 +388,13 @@ func startDevicePolling(d UserDevice) {
 
 		communicationTimeout := time.Duration(d.TimeoutSec) * time.Second
 		lastSuccessfulRead := time.Now()
-
-		// Начинаем со статуса true, чтобы первый же пропуск тикера корректно обработал отсутствие связи
 		linkDown := true
 
 		if err := client.Open(); err == nil {
 			linkDown = false
 			log.Printf("[%s] Успешное первое подключение к Modbus TCP.", d.Name)
 		} else {
-			log.Printf("[%s] Контроллер недоступен при старте. Будет отправлен повторный пул нулей.", d.Name)
-			// Убрали отсюда прямой вызов initializeSensorsWithZeros, так как он выполнится на первом тике
+			log.Printf("[%s] Контроллер недоступен при старте. Статус будет обработан на первом тике таймера.", d.Name)
 		}
 
 		ticker := time.NewTicker(5 * time.Second)
@@ -385,7 +404,6 @@ func startDevicePolling(d UserDevice) {
 		for {
 			select {
 			case <-ticker.C:
-				// Если MQTT упал или реконнектится, мягко пропускаем итерацию без паники
 				if mqttClient == nil || !mqttClient.IsConnected() {
 					continue
 				}
@@ -407,7 +425,7 @@ func startDevicePolling(d UserDevice) {
 					if err != nil {
 						deviceReadError = true
 						if linkDown {
-							mqttClient.Publish(stateTopic, 0, false, "0.00")
+							safeMqttPublish(stateTopic, 0, false, "0.00")
 						}
 						continue
 					}
@@ -419,7 +437,7 @@ func startDevicePolling(d UserDevice) {
 					}
 
 					val := float64(raw) * reg.Scale
-					mqttClient.Publish(stateTopic, 0, false, fmt.Sprintf("%.2f", val))
+					safeMqttPublish(stateTopic, 0, false, fmt.Sprintf("%.2f", val))
 				}
 
 				if deviceReadError && !linkDown {
