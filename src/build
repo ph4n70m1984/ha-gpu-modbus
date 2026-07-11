@@ -1,0 +1,2 @@
+$env:CGO_ENABLED="0"; $env:GOOS="linux"; $env:GOARCH="amd64"; go build -ldflags="-s -w" -o ../custom_components/gpu_modbus/bin/gpu_bridge_amd64 main.go
+$env:CGO_ENABLED="0"; $env:GOOS="linux"; $env:GOARCH="arm64"; go build -ldflags="-s -w" -o ../custom_components/gpu_modbus/bin/gpu_bridge_arm64 main.go
