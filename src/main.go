@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -297,11 +298,39 @@ func safeMqttPublish(topic string, qos byte, retained bool, payload interface{})
 	mqttClient.Publish(topic, qos, retained, payload)
 }
 
+func calculateCurrentImbalance(ia, ib, ic float64) float64 {
+	if ia < 1.0 && ib < 1.0 && ic < 1.0 {
+		return 0.0
+	}
+
+	sred := (ia + ib + ic) / 3.0
+	if sred == 0 {
+		return 0.0
+	}
+
+	diffA := math.Abs(ia - sred)
+	diffB := math.Abs(ib - sred)
+	diffC := math.Abs(ic - sred)
+
+	maxDiff := diffA
+	if diffB > maxDiff {
+		maxDiff = diffB
+	}
+	if diffC > maxDiff {
+		maxDiff = diffC
+	}
+
+	return (maxDiff / sred) * 100.0
+}
+
 func initializeSensorsWithZeros(d UserDevice, model ControllerModel) {
 	for _, reg := range model.Registers {
 		stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
 		safeMqttPublish(stateTopic, 0, false, "0.00")
 	}
+	// Также обнуляем виртуальный сенсор перекоса токов
+	imbalanceTopic := fmt.Sprintf("gpu/%s/current_imbalance/state", d.ID)
+	safeMqttPublish(imbalanceTopic, 0, false, "0.0")
 }
 
 func startDevicePolling(d UserDevice) {
@@ -315,7 +344,6 @@ func startDevicePolling(d UserDevice) {
 		d.TimeoutSec = 10
 	}
 
-	// Ждем до 5 секунд инициализации MQTT
 	for i := 0; i < 5; i++ {
 		if mqttClient != nil && mqttClient.IsConnected() {
 			break
@@ -323,17 +351,17 @@ func startDevicePolling(d UserDevice) {
 		time.Sleep(1 * time.Second)
 	}
 
-	// Отправка MQTT Discovery
+	// Отправка MQTT Discovery для основных регистров
 	for _, reg := range model.Registers {
 		discoveryTopic := fmt.Sprintf("homeassistant/sensor/%s/%s/config", d.ID, reg.ID)
 		stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
 
 		unit := reg.Unit
 		if reg.DeviceClass == "pressure" {
-			checkUnit := strings.ToLower(reg.Unit)
-			if checkUnit == "kpa" {
+			switch strings.ToLower(reg.Unit) {
+			case "kpa":
 				unit = "kPa"
-			} else if checkUnit == "bar" {
+			case "bar":
 				unit = "bar"
 			}
 		}
@@ -354,6 +382,25 @@ func startDevicePolling(d UserDevice) {
 		jsonData, _ := json.Marshal(payload)
 		safeMqttPublish(discoveryTopic, 1, true, jsonData)
 	}
+
+	// Отправка MQTT Discovery для виртуальной сущности перекоса токов
+	imbalanceConfigTopic := fmt.Sprintf("homeassistant/sensor/%s/current_imbalance/config", d.ID)
+	imbalanceStateTopic := fmt.Sprintf("gpu/%s/current_imbalance/state", d.ID)
+
+	imbalancePayload := HADiscoveryPayload{
+		Name:              fmt.Sprintf("%s Перекос тока", d.Name),
+		StateTopic:        imbalanceStateTopic,
+		UnitOfMeasurement: "%",
+		UniqueID:          fmt.Sprintf("%s_current_imbalance", d.ID),
+		Device: map[string]any{
+			"identifiers":  []string{d.ID},
+			"name":         d.Name,
+			"manufacturer": model.Manufacturer,
+			"model":        model.Name,
+		},
+	}
+	imbalanceJson, _ := json.Marshal(imbalancePayload)
+	safeMqttPublish(imbalanceConfigTopic, 1, true, imbalanceJson)
 
 	initializeSensorsWithZeros(d, model)
 
@@ -387,7 +434,6 @@ func startDevicePolling(d UserDevice) {
 					continue
 				}
 
-				// Создаем клиент внутри тика
 				client, err := modbus.NewClient(&modbus.ClientConfiguration{
 					URL:     "tcp://" + d.Address,
 					Timeout: 2 * time.Second,
@@ -404,11 +450,11 @@ func startDevicePolling(d UserDevice) {
 
 				deviceReadError := false
 
-				// Пытаемся открыть сокет
+				var currentA, currentB, currentC float64
+				var hasCurrentA, hasCurrentB, hasCurrentC bool
+
 				if err := client.Open(); err != nil {
 					deviceReadError = true
-					// ИСПРАВЛЕНИЕ: Если связи нет и мы находимся в состоянии linkDown,
-					// продолжаем слать нули в Home Assistant на каждый тик таймера.
 					if linkDown {
 						initializeSensorsWithZeros(d, model)
 					}
@@ -441,13 +487,34 @@ func startDevicePolling(d UserDevice) {
 
 						val := float64(raw) * reg.Scale
 						safeMqttPublish(stateTopic, 0, false, fmt.Sprintf("%.2f", val))
+
+						switch reg.ID {
+						case "current_a":
+							currentA = val
+							hasCurrentA = true
+						case "current_b":
+							currentB = val
+							hasCurrentB = true
+						case "current_c":
+							currentC = val
+							hasCurrentC = true
+						}
 					}
 
-					// Явно закрываем
+					if hasCurrentA && hasCurrentB && hasCurrentC {
+						imbalance := calculateCurrentImbalance(currentA, currentB, currentC)
+						imbalanceTopic := fmt.Sprintf("gpu/%s/current_imbalance/state", d.ID)
+						safeMqttPublish(imbalanceTopic, 0, false, fmt.Sprintf("%.1f", imbalance))
+
+						if imbalance > 15.0 {
+							log.Printf("[%s] ВНИМАНИЕ: Высокий перекос токов: %.1f%% (A:%.1fA, B:%.1fA, C:%.1fA)",
+								d.Name, imbalance, currentA, currentB, currentC)
+						}
+					}
+
 					client.Close()
 				}
 
-				// Обработка перехода из "В сети" -> "Авария" при истечении таймаута
 				if deviceReadError && !linkDown {
 					if time.Since(lastSuccessfulRead) > communicationTimeout {
 						log.Printf("[%s] Авария связи! Нет данных > %v. Сброс в 0.", d.Name, communicationTimeout)
