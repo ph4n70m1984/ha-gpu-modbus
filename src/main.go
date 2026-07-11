@@ -407,6 +407,11 @@ func startDevicePolling(d UserDevice) {
 				// Пытаемся открыть сокет
 				if err := client.Open(); err != nil {
 					deviceReadError = true
+					// ИСПРАВЛЕНИЕ: Если связи нет и мы находимся в состоянии linkDown,
+					// продолжаем слать нули в Home Assistant на каждый тик таймера.
+					if linkDown {
+						initializeSensorsWithZeros(d, model)
+					}
 				} else {
 					for _, reg := range model.Registers {
 						var raw uint16
@@ -422,7 +427,7 @@ func startDevicePolling(d UserDevice) {
 
 						if readErr != nil {
 							deviceReadError = true
-							if !linkDown {
+							if linkDown {
 								safeMqttPublish(stateTopic, 0, false, "0.00")
 							}
 							continue
@@ -442,6 +447,7 @@ func startDevicePolling(d UserDevice) {
 					client.Close()
 				}
 
+				// Обработка перехода из "В сети" -> "Авария" при истечении таймаута
 				if deviceReadError && !linkDown {
 					if time.Since(lastSuccessfulRead) > communicationTimeout {
 						log.Printf("[%s] Авария связи! Нет данных > %v. Сброс в 0.", d.Name, communicationTimeout)
