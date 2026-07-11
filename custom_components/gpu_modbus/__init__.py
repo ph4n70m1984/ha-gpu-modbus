@@ -89,12 +89,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             protocol_err = asyncio.StreamReaderProtocol(reader_err)
             await loop.connect_read_pipe(lambda: protocol_err, go_process.stderr)
             
-            # Запускаем параллельное чтение stdout (как INFO) и stderr (как WARNING)
+            # ИСПРАВЛЕНИЕ: Просто регистрируем фоновые задачи через hass.async_create_task 
+            # и возвращаем объект gather, НЕ блокируя выполнение через await внутри функции установки
             t1 = hass.async_create_task(_read_stream(reader_out, _LOGGER.info))
             t2 = hass.async_create_task(_read_stream(reader_err, _LOGGER.warning))
             return asyncio.gather(t1, t2)
 
-        log_task = await connect_streams()
+        # Запускаем подключение труб асинхронно без блокировки основного потока HA
+        log_task = hass.async_create_task(connect_streams())
 
     except Exception as e:
         _LOGGER.error(f"Не удалось запустить Go-процесс моста ГПУ: {e}")
@@ -116,6 +118,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.error(f"Ошибка регистрации боковой панели: {e}")
 
     return True
+
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     global go_process, log_task
