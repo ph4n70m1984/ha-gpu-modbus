@@ -284,7 +284,6 @@ func handleDevices(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Безопасная отправка публикаций в MQTT с изоляцией паник внутренней библиотеки
 func safeMqttPublish(topic string, qos byte, retained bool, payload interface{}) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -298,7 +297,6 @@ func safeMqttPublish(topic string, qos byte, retained bool, payload interface{})
 	mqttClient.Publish(topic, qos, retained, payload)
 }
 
-// Заполнение топиков нулями для сброса состояния датчиков в Home Assistant
 func initializeSensorsWithZeros(d UserDevice, model ControllerModel) {
 	for _, reg := range model.Registers {
 		stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
@@ -317,7 +315,7 @@ func startDevicePolling(d UserDevice) {
 		d.TimeoutSec = 10
 	}
 
-	// Ждем до 5 секунд, если брокер MQTT еще подключается
+	// Ждем до 5 секунд инициализации MQTT
 	for i := 0; i < 5; i++ {
 		if mqttClient != nil && mqttClient.IsConnected() {
 			break
@@ -357,7 +355,6 @@ func startDevicePolling(d UserDevice) {
 		safeMqttPublish(discoveryTopic, 1, true, jsonData)
 	}
 
-	// Инициализируем сущности стартовыми нулями
 	initializeSensorsWithZeros(d, model)
 
 	stopChan := make(chan struct{})
@@ -390,14 +387,13 @@ func startDevicePolling(d UserDevice) {
 					continue
 				}
 
-				// ИСПРАВЛЕНИЕ: Создаем и открываем клиент Modbus строго локально внутри итерации тика
+				// Создаем клиент внутри тика
 				client, err := modbus.NewClient(&modbus.ClientConfiguration{
 					URL:     "tcp://" + d.Address,
 					Timeout: 2 * time.Second,
 				})
 
 				if err != nil {
-					// Ошибка конфигурации адреса (ноль паник)
 					if !linkDown && time.Since(lastSuccessfulRead) > communicationTimeout {
 						log.Printf("[%s] Авария связи (ошибка конфигурации)! Сброс в 0.", d.Name)
 						linkDown = true
@@ -412,7 +408,6 @@ func startDevicePolling(d UserDevice) {
 				if err := client.Open(); err != nil {
 					deviceReadError = true
 				} else {
-					// Если сокет открылся — читаем регистры
 					for _, reg := range model.Registers {
 						var raw uint16
 						var readErr error
@@ -443,11 +438,10 @@ func startDevicePolling(d UserDevice) {
 						safeMqttPublish(stateTopic, 0, false, fmt.Sprintf("%.2f", val))
 					}
 
-					// Явно закрываем успешно открытый клиент
+					// Явно закрываем
 					client.Close()
 				}
 
-				// Обработка таймаута при любой ошибке (не открылся сокет или ошибка чтения регистра)
 				if deviceReadError && !linkDown {
 					if time.Since(lastSuccessfulRead) > communicationTimeout {
 						log.Printf("[%s] Авария связи! Нет данных > %v. Сброс в 0.", d.Name, communicationTimeout)
