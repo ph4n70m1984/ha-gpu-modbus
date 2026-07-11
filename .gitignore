@@ -12,4 +12,4 @@ esp32/src/secrets.h
 
 .pio/
 .vscode/
-src/
+# src/
