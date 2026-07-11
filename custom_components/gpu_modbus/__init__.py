@@ -4,7 +4,6 @@ import subprocess
 import logging
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.components.frontend import async_register_panel, async_remove_panel
 
 _LOGGER = logging.getLogger(__name__)
 DOMAIN = "gpu_modbus"
@@ -44,26 +43,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         stderr=subprocess.DEVNULL
     )
 
-    # --- ДОБАВЛЕНИЕ НА БОКОВУЮ ПАНЕЛЬ ---
-    # Мы регистрируем iframe, который откроет веб-морду Go (порт 8080) прямо внутри Home Assistant
-    async_register_panel(
-        hass,
-        frontend_url_path="gpu_modbus_panel",       # URL-путь внутри HA
-        webcomponent_name="ha-panel-iframe",        # Тип панели (встроенный iframe)
-        sidebar_title="Панель ГПУ",                 # Имя кнопки на боковой панели
-        sidebar_icon="mdi:engine-outline",          # Иконка (промышленный мотор/двигатель)
-        config={"url": "http://localhost:8080"},    # Ссылка на локальный порт Go
-        require_admin=False                         # Доступно всем или только админам (True)
-    )
+    # --- ИСПРАВЛЕННОЕ ДОБАВЛЕНИЕ НА БОКОВУЮ ПАНЕЛЬ ---
+    # Проверяем, загружен ли компонент frontend в Home Assistant
+    if "frontend" in hass.config.components:
+        _LOGGER.info("Регистрация панели ГПУ на боковой панели")
+        hass.components.frontend.async_register_panel(
+            frontend_url_path="gpu_modbus_panel",       # URL-путь внутри HA
+            webcomponent_name="ha-panel-iframe",        # Тип панели (встроенный iframe)
+            sidebar_title="Панель ГПУ",                 # Имя кнопки на боковой панели
+            sidebar_icon="mdi:engine-outline",          # Иконка
+            config={"url": "http://localhost:8080"},    # Ссылка на локальный порт Go
+            require_admin=False                         # Доступно всем пользователям
+        )
 
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     global go_process
     
-    # --- УДАЛЕНИЕ С БОКОВОЙ ПАНЕЛИ ---
-    # Если пользователь удалит интеграцию, кнопка сбоку тоже пропадет
-    async_remove_panel(hass, "gpu_modbus_panel")
+    # --- ИСПРАВЛЕННОЕ УДАЛЕНИЕ С БОКОВОЙ ПАНЕЛИ ---
+    if "frontend" in hass.config.components:
+        try:
+            hass.components.frontend.async_remove_panel("gpu_modbus_panel")
+        except Exception as e:
+            _LOGGER.error(f"Ошибка при удалении панели ГПУ: {e}")
 
     if go_process:
         _LOGGER.info("Остановка Go-моста ГПУ...")
