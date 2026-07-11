@@ -1,6 +1,7 @@
 import os
 import platform
 import subprocess
+import asyncio
 import logging
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
@@ -8,10 +9,29 @@ from homeassistant.components import frontend
 
 _LOGGER = logging.getLogger(__name__)
 DOMAIN = "gpu_modbus"
+
+# Глобальные переменные для управления процессом
 go_process = None
+log_task = None
+
+async def _read_stream(stream, log_func):
+    """Фоновая задача для чтения логов из потока Go-бинарника."""
+    try:
+        while True:
+            line = await stream.readline()
+            if not line:
+                break
+            # Декодируем строку и убираем лишние пробелы/переносы
+            decoded_line = line.decode('utf-8', errors='replace').strip()
+            if decoded_line:
+                log_func(f"[Go Backend] {decoded_line}")
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        _LOGGER.error(f"Ошибка при чтении журнала Go-моста: {e}")
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    global go_process
+    global go_process, log_task
     
     current_dir = os.path.dirname(__file__)
     arch = platform.machine()
@@ -31,13 +51,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as e:
         _LOGGER.warning(f"Не удалось установить права +x на бинарник: {e}")
 
-    # Подготовка переменных окружения для Go-процесса
+    # Подготовка переменных окружения
     env = os.environ.copy()
     env["CONTROLLERS_PATH"] = os.path.join(current_dir, "controllers")
     env["WEB_PATH"] = os.path.join(current_dir, "web")
     env["DATA_PATH"] = os.path.join(hass.config.config_dir, "gpu_modbus_data")
     
-    # --- НАСТРОЙКИ MQTT ---
+    # Настройки MQTT
     mqtt_broker = entry.data.get("mqtt_broker", "127.0.0.1:1883")
     if not mqtt_broker.startswith("tcp://") and not mqtt_broker.startswith("ws://"):
         mqtt_broker = f"tcp://{mqtt_broker}"
@@ -48,12 +68,37 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     
     _LOGGER.info(f"Запуск Go-моста ГПУ: {bin_path} (MQTT: {mqtt_broker})")
     
-    go_process = subprocess.Popen(
-        [bin_path],
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
+    # Запускаем процесс с перенаправлением stdout и stderr в PIPE
+    try:
+        go_process = subprocess.Popen(
+            [bin_path],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        # Переводим потоки в асинхронный режим Home Assistant
+        loop = asyncio.get_running_loop()
+        
+        async def connect_streams():
+            reader_out = asyncio.StreamReader()
+            protocol_out = asyncio.StreamReaderProtocol(reader_out)
+            await loop.connect_read_pipe(lambda: protocol_out, go_process.stdout)
+            
+            reader_err = asyncio.StreamReader()
+            protocol_err = asyncio.StreamReaderProtocol(reader_err)
+            await loop.connect_read_pipe(lambda: protocol_err, go_process.stderr)
+            
+            # Запускаем параллельное чтение stdout (как INFO) и stderr (как WARNING)
+            t1 = hass.async_create_task(_read_stream(reader_out, _LOGGER.info))
+            t2 = hass.async_create_task(_read_stream(reader_err, _LOGGER.warning))
+            return asyncio.gather(t1, t2)
+
+        log_task = await connect_streams()
+
+    except Exception as e:
+        _LOGGER.error(f"Не удалось запустить Go-процесс моста ГПУ: {e}")
+        return False
 
     # Регистрация боковой панели
     web_url = entry.data.get("web_url", "http://localhost:8080")
@@ -67,23 +112,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             config={"url": web_url},
             require_admin=False
         )
-        _LOGGER.info(f"Панель ГПУ зарегистрирована по адресу: {web_url}")
     except Exception as e:
         _LOGGER.error(f"Ошибка регистрации боковой панели: {e}")
 
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    global go_process
+    global go_process, log_task
     
     try:
         frontend.async_remove_panel(hass, "gpu_modbus_panel")
     except Exception as e:
         _LOGGER.error(f"Ошибка при удалении панели ГПУ: {e}")
 
+    # Отменяем задачу логирования
+    if log_task:
+        log_task.cancel()
+        log_task = None
+
     if go_process:
         _LOGGER.info("Остановка Go-моста ГПУ...")
         go_process.terminate()
         go_process.wait()
         go_process = None
+        
     return True
