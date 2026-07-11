@@ -2,103 +2,215 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>Управление ГПУ Мостами</title>
+    <title>Панель управления ГПУ Modbus Мост</title>
     <style>
-        body { font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; color: #333; background: #fafafa; }
-        .card { border: 1px solid #ddd; padding: 20px; border-radius: 8px; margin-bottom: 20px; background: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-        label { display: block; margin-top: 12px; font-weight: bold; }
-        input, select { width: 100%; padding: 10px; margin-top: 6px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
-        button { background: #03a9f4; color: white; border: none; padding: 12px 24px; margin-top: 18px; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: bold; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f5f5f5; color: #333; padding: 20px; }
+        .container { max-width: 900px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1, h2 { color: #03a9f4; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input, select { width: 100%; padding: 8px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+        button { background: #03a9f4; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; font-size: 14px; }
         button:hover { background: #0288d1; }
-        ul { list-style: none; padding: 0; }
-        li { background: #f9f9f9; padding: 12px; border: 1px solid #eee; margin-bottom: 6px; border-radius: 4px; }
-        .btn-link { color: white; text-decoration: none; padding: 10px 20px; border-radius: 4px; font-weight: bold; display: inline-block; }
+        .btn-danger { background: #d32f2f; }
+        .btn-danger:hover { background: #c62828; }
+        .btn-secondary { background: #757575; margin-right: 5px; }
+        .btn-secondary:hover { background: #616161; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        .actions { white-space: nowrap; }
     </style>
 </head>
 <body>
-    <h1>Панель управления ГПУ (Modbus-to-MQTT)</h1>
 
-    <div class="card">
-        <h2>Добавить новую ГПУ</h2>
-        <form id="addForm">
-            <label>Название установки:</label>
-            <input type="text" id="name" required placeholder="ГПУ-1">
+<div class="container">
+    <h1>ГПУ Modbus Мост</h1>
+    <p>Управление конфигурацией промышленных контроллеров ГПУ.</p>
 
-            <label>IP-адрес и порт контроллера:</label>
-            <input type="text" id="address" required placeholder="192.168.1.100:502">
+    <hr>
 
-            <label>Модель контроллера:</label>
-            <select id="model" required></select>
-
-            <label>Таймаут потери связи (в секундах, после чего слать 0):</label>
-            <input type="number" id="timeout_sec" required value="10" min="2" max="300">
-
-            <button type="submit">Добавить в Home Assistant</button>
-        </form>
-    </div>
-
-    <div class="card">
-        <h2>Текущие установки в работе</h2>
-        <ul id="deviceList"></ul>
-    </div>
-
-    <div class="card" style="background: #fffde7; border-color: #fff59d; text-align: center;">
-        <h3>Понравился проект? Поддержите разработку!</h3>
-        <p>Проект является полностью бесплатным и открытым. Ваши донаты помогают развивать интеграцию.</p>
-        <div style="margin-top: 15px;">
-            <a href="https://boosty.to/your_profile" target="_blank" class="btn-link" style="background: #ff5722; margin-right: 10px;">Поддержать на Boosty</a>
-            <a href="https://github.com/sponsors/your_profile" target="_blank" class="btn-link" style="background: #24292e;">GitHub Sponsors</a>
+    <h2 id="form-title">Добавить новую установку</h2>
+    <form id="device-form">
+        <input type="hidden" id="device-id" value="">
+        
+        <div class="form-group">
+            <label for="name">Название ГПУ:</label>
+            <input type="text" id="name" placeholder="Например, ГПУ-1" required>
         </div>
-    </div>
+        <div class="form-group">
+            <label for="address">Modbus TCP Адрес (IP:Порт):</label>
+            <input type="text" id="address" placeholder="Например, 192.168.1.100:502" required>
+        </div>
+        <div class="form-group">
+            <label for="model_id">Профиль контроллера:</label>
+            <select id="model_id" required>
+                <!-- Заполняется динамически из API -->
+            </select>
+        </div>
+        <div class="form-group">
+            <label for="timeout_sec">Таймаут отсутствия связи (секунды):</label>
+            <input type="number" id="timeout_sec" value="10" min="5" required>
+        </div>
+        
+        <button type="submit" id="submit-btn">Сохранить установку</button>
+        <button type="button" id="cancel-btn" class="btn-secondary" style="display:none;" onclick="resetForm()">Отмена</button>
+    </form>
 
-    <script>
-        fetch('/api/models')
-            .then(res => res.json())
-            .then(models => {
-                const select = document.getElementById('model');
-                models.forEach(m => {
-                    const opt = document.createElement('option');
-                    opt.value = m.model_id;
-                    opt.textContent = `${m.manufacturer} - ${m.name}`;
-                    select.appendChild(opt);
-                });
+    <hr style="margin-top: 40px;">
+
+    <h2>Текущие установки в работе</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Название</th>
+                <th>Адрес Modbus</th>
+                <th>Контроллер</th>
+                <th>Таймаут</th>
+                <th>Действия</th>
+            </tr>
+        </thead>
+        <tbody id="devices-table-body">
+            <!-- Заполняется динамически -->
+        </tbody>
+    </table>
+</div>
+
+<script>
+    const API_URL = window.location.origin;
+    let availableModels = {};
+
+    // Загрузка доступных моделей из Go бэкенда
+    async function loadModels() {
+        try {
+            const res = await fetch(`${API_URL}/api/models`);
+            const models = await res.json();
+            const select = document.getElementById('model_id');
+            select.innerHTML = '';
+            models.forEach(m => {
+                availableModels[m.model_id] = m.name;
+                let opt = document.createElement('option');
+                opt.value = m.model_id;
+                opt.innerText = `${m.manufacturer} - ${m.name}`;
+                select.appendChild(opt);
             });
-
-        function loadDevices() {
-            fetch('/api/devices')
-                .then(res => res.json())
-                .then(devices => {
-                    const list = document.getElementById('deviceList');
-                    list.innerHTML = devices.length === 0 ? '<li>Нет активных установок</li>' : '';
-                    devices.forEach(d => {
-                        const li = document.createElement('li');
-                        li.innerHTML = `<div><strong>${d.name}</strong> (${d.address})<br><small>Контроллер: ${d.model_id} | Таймаут: ${d.timeout_sec}с</small></div>`;
-                        list.appendChild(li);
-                    });
-                });
+        } catch (err) {
+            console.error('Ошибка загрузки моделей:', err);
         }
+    }
 
-        document.getElementById('addForm').onsubmit = function(e) {
-            e.preventDefault();
-            const data = {
-                name: document.getElementById('name').value,
-                address: document.getElementById('address').value,
-                model_id: document.getElementById('model').value,
-                timeout_sec: parseInt(document.getElementById('timeout_sec').value, 10)
-            };
+    // Загрузка списка уже добавленных ГПУ
+    async function loadDevices() {
+        try {
+            const res = await fetch(`${API_URL}/api/devices`);
+            const devices = await res.json();
+            const tbody = document.getElementById('devices-table-body');
+            tbody.innerHTML = '';
 
-            fetch('/api/devices', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(data)
-            }).then(() => {
-                loadDevices();
-                document.getElementById('addForm').reset();
-                document.getElementById('timeout_sec').value = "10";
+            if(devices.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;">Нет активных установок в работе</td></tr>';
+                return;
+            }
+
+            devices.forEach(d => {
+                let tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td><strong>${d.name}</strong></td>
+                    <td>${d.address}</td>
+                    <td><code style="background:#e0f7fa; padding:2px 6px; border-radius:4px;">${d.model_id}</code></td>
+                    <td>${d.timeout_sec}с</td>
+                    <td class="actions">
+                        <button class="btn-secondary" onclick="editDevice('${d.id}', '${d.name}', '${d.address}', '${d.model_id}', ${d.timeout_sec})">Редактировать</button>
+                        <button class="btn-danger" onclick="deleteDevice('${d.id}')">Удалить</button>
+                    </td>
+                `;
+                tbody.appendChild(tr);
             });
+        } catch (err) {
+            console.error('Ошибка загрузки устройств:', err);
+        }
+    }
+
+    // Обработка отправки формы (создание или редактирование)
+    document.getElementById('device-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        
+        const id = document.getElementById('device-id').value;
+        const deviceData = {
+            name: document.getElementById('name').value,
+            address: document.getElementById('address').value,
+            model_id: document.getElementById('model_id').value,
+            timeout_sec: parseInt(document.getElementById('timeout_sec').value)
         };
 
-        loadDevices();
-    </script>
+        let method = 'POST';
+        if (id) {
+            method = 'PUT';
+            deviceData.id = id;
+        }
+
+        try {
+            const res = await fetch(`${API_URL}/api/devices`, {
+                method: method,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(deviceData)
+            });
+
+            if (res.ok) {
+                resetForm();
+                loadDevices();
+            } else {
+                alert('Не удалось сохранить изменения.');
+            }
+        } catch (err) {
+            console.error('Ошибка сети:', err);
+        }
+    });
+
+    // Перевод формы в режим редактирования ГПУ
+    function editDevice(id, name, address, model_id, timeout_sec) {
+        document.getElementById('form-title').innerText = 'Редактировать установку';
+        document.getElementById('device-id').value = id;
+        document.getElementById('name').value = name;
+        document.getElementById('address').value = address;
+        document.getElementById('model_id').value = model_id;
+        document.getElementById('timeout_sec').value = timeout_sec;
+        
+        document.getElementById('submit-btn').innerText = 'Применить изменения';
+        document.getElementById('cancel-btn').style.display = 'inline-block';
+    }
+
+    // Удаление ГПУ
+    async function deleteDevice(id) {
+        if (!confirm('Вы уверены, что хотите удалить эту установку и прекратить опрос сенсоров?')) return;
+
+        try {
+            const res = await fetch(`${API_URL}/api/devices?id=${id}`, { method: 'DELETE' });
+            if (res.ok) {
+                loadDevices();
+                if (document.getElementById('device-id').value === id) resetForm();
+            } else {
+                alert('Ошибка при удалении устройства.');
+            }
+        } catch (err) {
+            console.error('Ошибка при удалении:', err);
+        }
+    }
+
+    // Сброс формы в начальное состояние
+    function resetForm() {
+        document.getElementById('form-title').innerText = 'Добавить новую установку';
+        document.getElementById('device-id').value = '';
+        document.getElementById('device-form').reset();
+        document.getElementById('submit-btn').innerText = 'Сохранить установку';
+        document.getElementById('cancel-btn').style.display = 'none';
+    }
+
+    // Инициализация страницы
+    window.onload = async () => {
+        await loadModels();
+        await loadDevices();
+    };
+</script>
 </body>
 </html>
