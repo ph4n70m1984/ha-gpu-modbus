@@ -1,6 +1,5 @@
 import os
 import platform
-import subprocess
 import asyncio
 import logging
 from homeassistant.core import HomeAssistant
@@ -10,18 +9,16 @@ from homeassistant.components import frontend
 _LOGGER = logging.getLogger(__name__)
 DOMAIN = "gpu_modbus"
 
-# Глобальные переменные для управления процессом
 go_process = None
 log_task = None
 
 async def _read_stream(stream, log_func):
-    """Фоновая задача для чтения логов из потока Go-бинарника."""
+    """Асинхронное чтение потока вывода без блокировки."""
     try:
         while True:
             line = await stream.readline()
             if not line:
                 break
-            # Декодируем строку и убираем лишние пробелы/переносы
             decoded_line = line.decode('utf-8', errors='replace').strip()
             if decoded_line:
                 log_func(f"[Go Backend] {decoded_line}")
@@ -30,8 +27,36 @@ async def _read_stream(stream, log_func):
     except Exception as e:
         _LOGGER.error(f"Ошибка при чтении журнала Go-моста: {e}")
 
+async def start_go_process(bin_path, env, hass):
+    """Запуск бинарника как полностью независимого фонового процесса."""
+    global go_process
+    try:
+        # Используем нативный asyncio вместо subprocess, чтобы не блокировать event loop
+        go_process = await asyncio.create_subprocess_exec(
+            bin_path,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        # Запускаем чтение логов 
+        t1 = hass.loop.create_task(_read_stream(go_process.stdout, _LOGGER.info))
+        t2 = hass.loop.create_task(_read_stream(go_process.stderr, _LOGGER.warning))
+        
+        await asyncio.gather(t1, t2)
+        
+    except asyncio.CancelledError:
+        if go_process:
+            _LOGGER.info("Отмена фоновой задачи: завершение Go-процесса...")
+            try:
+                go_process.terminate()
+            except ProcessLookupError:
+                pass
+    except Exception as e:
+        _LOGGER.error(f"Критическая ошибка работы Go-процесса: {e}")
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    global go_process, log_task
+    global log_task
     
     current_dir = os.path.dirname(__file__)
     arch = platform.machine()
@@ -57,7 +82,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     env["WEB_PATH"] = os.path.join(current_dir, "web")
     env["DATA_PATH"] = os.path.join(hass.config.config_dir, "gpu_modbus_data")
     
-    # Настройки MQTT
     mqtt_broker = entry.data.get("mqtt_broker", "127.0.0.1:1883")
     if not mqtt_broker.startswith("tcp://") and not mqtt_broker.startswith("ws://"):
         mqtt_broker = f"tcp://{mqtt_broker}"
@@ -66,41 +90,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     env["MQTT_USER"] = entry.data.get("mqtt_user", "")
     env["MQTT_PASSWORD"] = entry.data.get("mqtt_password", "")
     
-    _LOGGER.info(f"Запуск Go-моста ГПУ: {bin_path} (MQTT: {mqtt_broker})")
+    _LOGGER.info(f"Инициализация Go-моста ГПУ: {bin_path}")
     
-    # Запускаем процесс с перенаправлением stdout и stderr в PIPE
-    try:
-        go_process = subprocess.Popen(
-            [bin_path],
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+    # ЗАЩИТА ОТ ЗАВИСАНИЯ HA:
+    # Запускаем процесс как фоновую задачу (Background Task), 
+    # чтобы ядро Home Assistant не ждало её завершения при старте системы.
+    if hasattr(hass, "async_create_background_task"):
+        log_task = hass.async_create_background_task(
+            start_go_process(bin_path, env, hass),
+            name="gpu_modbus_go_backend"
         )
-        
-        # Переводим потоки в асинхронный режим Home Assistant
-        loop = asyncio.get_running_loop()
-        
-        async def connect_streams():
-            reader_out = asyncio.StreamReader()
-            protocol_out = asyncio.StreamReaderProtocol(reader_out)
-            await loop.connect_read_pipe(lambda: protocol_out, go_process.stdout)
-            
-            reader_err = asyncio.StreamReader()
-            protocol_err = asyncio.StreamReaderProtocol(reader_err)
-            await loop.connect_read_pipe(lambda: protocol_err, go_process.stderr)
-            
-            # ИСПРАВЛЕНИЕ: Просто регистрируем фоновые задачи через hass.async_create_task 
-            # и возвращаем объект gather, НЕ блокируя выполнение через await внутри функции установки
-            t1 = hass.async_create_task(_read_stream(reader_out, _LOGGER.info))
-            t2 = hass.async_create_task(_read_stream(reader_err, _LOGGER.warning))
-            return asyncio.gather(t1, t2)
-
-        # Запускаем подключение труб асинхронно без блокировки основного потока HA
-        log_task = hass.async_create_task(connect_streams())
-
-    except Exception as e:
-        _LOGGER.error(f"Не удалось запустить Go-процесс моста ГПУ: {e}")
-        return False
+    else:
+        # Фолбэк для старых версий HA
+        log_task = hass.loop.create_task(start_go_process(bin_path, env, hass))
 
     # Регистрация боковой панели
     web_url = entry.data.get("web_url", "http://localhost:8080")
@@ -119,24 +121,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     return True
 
-
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    global go_process, log_task
+    global log_task, go_process
     
     try:
         frontend.async_remove_panel(hass, "gpu_modbus_panel")
     except Exception as e:
         _LOGGER.error(f"Ошибка при удалении панели ГПУ: {e}")
 
-    # Отменяем задачу логирования
+    # При удалении интеграции корректно отменяем фоновую задачу,
+    # что автоматически вызовет CancelledError и убьет процесс Go.
     if log_task:
         log_task.cancel()
         log_task = None
-
+        
     if go_process:
-        _LOGGER.info("Остановка Go-моста ГПУ...")
-        go_process.terminate()
-        go_process.wait()
+        try:
+            go_process.terminate()
+        except Exception:
+            pass
         go_process = None
         
     return True
