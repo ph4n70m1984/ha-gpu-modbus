@@ -21,6 +21,13 @@
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
         }
 
+        /* Принудительная активация скролла */
+        body {
+            position: relative !important;
+            overflow-y: scroll !important;
+            -webkit-overflow-scrolling: touch !important;
+        }
+
         /* Основной контейнер страницы */
         .page-content-wrapper {
             display: block;
@@ -30,6 +37,7 @@
             box-sizing: border-box;
             padding: 15px;
             position: relative;
+            overflow: visible !important;
         }
 
         .container { 
@@ -43,11 +51,12 @@
             box-sizing: border-box; 
             position: relative;
             min-height: 500px;
+            overflow: visible !important;
         }
 
         /* Критический спейсер для выталкивания контента */
         .webview-spacer {
-            height: 300px !important;
+            height: 400px !important;
             width: 100%;
             display: block;
             clear: both;
@@ -57,10 +66,22 @@
 
         /* Дополнительный спейсер для мобильных устройств */
         .mobile-spacer {
-            height: 150px !important;
+            height: 200px !important;
             width: 100%;
             display: block;
             clear: both;
+        }
+
+        /* Скрытый триггер для активации скролла */
+        .scroll-trigger {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            width: 1px;
+            height: 1px;
+            opacity: 0;
+            pointer-events: none;
+            z-index: -1;
         }
 
         /* Кнопка "Наверх" */
@@ -115,29 +136,25 @@
         .card-actions { display: flex; gap: 10px; margin-top: 15px; }
         .card-actions button { flex: 1; text-align: center; padding: 10px; font-size: 14px; }
 
-        /* Специальные стили для WebView в HA */
-        .ha-webview-fix {
-            position: relative;
-            z-index: 1;
-        }
-
         @media (max-width: 768px) {
             .table-container { display: none; }
             .cards-container { display: flex; }
             #back-to-top { bottom: 80px; right: 20px; }
-            .webview-spacer { height: 400px !important; }
-            .mobile-spacer { height: 200px !important; }
+            .webview-spacer { height: 500px !important; }
+            .mobile-spacer { height: 300px !important; }
         }
 
-        /* Для очень маленьких экранов */
         @media (max-width: 480px) {
             .page-content-wrapper { padding: 10px; }
             .container { padding: 15px; }
-            .webview-spacer { height: 450px !important; }
+            .webview-spacer { height: 600px !important; }
         }
     </style>
 </head>
 <body>
+
+<!-- Скрытый триггер для активации скролла -->
+<div class="scroll-trigger" id="scrollTrigger"></div>
 
 <div class="page-content-wrapper">
     <div class="container">
@@ -208,19 +225,54 @@
 <script>
     const API_URL = window.location.origin;
     let availableModels = {};
-    let isScrolling = false;
+    let activationAttempts = 0;
 
-    // Функция скролла наверх с принудительным обновлением
+    // Функция принудительной активации скролла
+    function forceScrollActivation() {
+        // Метод 1: Принудительная установка стилей
+        document.documentElement.style.overflowY = 'scroll';
+        document.body.style.overflowY = 'scroll';
+        document.documentElement.style.height = 'auto';
+        document.body.style.height = 'auto';
+        
+        // Метод 2: Создание и удаление элемента для пробуждения WebView
+        const trigger = document.createElement('div');
+        trigger.style.cssText = 'position:fixed;bottom:0;left:0;width:10px;height:10px;opacity:0;pointer-events:none;';
+        trigger.id = 'scroll-activation-trigger';
+        document.body.appendChild(trigger);
+        
+        // Метод 3: Имитация скролла
+        window.scrollTo(0, 1);
+        setTimeout(() => window.scrollTo(0, 0), 50);
+        
+        // Метод 4: Принудительное событие
+        const event = new Event('scroll', { bubbles: true });
+        document.dispatchEvent(event);
+        window.dispatchEvent(event);
+        
+        // Метод 5: Фокус на body
+        document.body.focus();
+        
+        // Удаляем триггер через секунду
+        setTimeout(() => {
+            const el = document.getElementById('scroll-activation-trigger');
+            if (el) el.remove();
+        }, 1000);
+        
+        activationAttempts++;
+        console.log(`Scroll activation attempt ${activationAttempts}`);
+    }
+
+    // Функция скролла наверх
     function scrollToTop() {
         window.scrollTo({ top: 0, behavior: 'smooth' });
-        // Принудительно обновляем позицию скролла для WebView
         setTimeout(() => {
             document.documentElement.scrollTop = 0;
             document.body.scrollTop = 0;
         }, 100);
     }
 
-    // Улучшенная обработка скролла
+    // Обработка скролла
     window.addEventListener('scroll', () => {
         const btn = document.getElementById('back-to-top');
         const scrollPosition = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
@@ -232,25 +284,27 @@
         }
     });
 
-    // Принудительная проверка скролла при загрузке
-    document.addEventListener('DOMContentLoaded', () => {
-        // Проверяем возможность скролла
-        const checkScroll = () => {
-            const bodyHeight = document.body.scrollHeight;
-            const windowHeight = window.innerHeight;
-            
-            // Если контента больше чем видимая область, обеспечиваем возможность скролла
-            if (bodyHeight > windowHeight) {
-                document.documentElement.style.overflowY = 'scroll';
-                document.body.style.overflowY = 'scroll';
-            }
-        };
-        
-        // Проверяем после загрузки контента
-        setTimeout(checkScroll, 500);
-        
-        // И повторная проверка через секунду
-        setTimeout(checkScroll, 1000);
+    // Перехват касаний для активации скролла
+    document.addEventListener('touchstart', () => {
+        forceScrollActivation();
+    });
+
+    document.addEventListener('click', () => {
+        forceScrollActivation();
+    });
+
+    // Перехват свайпов
+    let touchStartY = 0;
+    document.addEventListener('touchstart', (e) => {
+        touchStartY = e.touches[0].clientY;
+    });
+
+    document.addEventListener('touchmove', (e) => {
+        const touchEndY = e.touches[0].clientY;
+        const diff = touchStartY - touchEndY;
+        if (Math.abs(diff) > 10) {
+            forceScrollActivation();
+        }
     });
 
     async function loadModels() {
@@ -286,8 +340,7 @@
                 const noDataHtml = '<div style="text-align:center; color:#999; padding:20px;">Нет активных установок в работе</div>';
                 tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:#999;">Нет активных установок в работе</td></tr>';
                 cardsContainer.innerHTML = noDataHtml;
-                // Обновляем проверку скролла
-                setTimeout(() => updateScrollable(), 100);
+                forceScrollActivation();
                 return;
             }
 
@@ -334,43 +387,15 @@
                 cardsContainer.appendChild(card);
             });
             
-            // Обновляем проверку скролла после загрузки контента
-            setTimeout(() => updateScrollable(), 200);
+            forceScrollActivation();
         } catch (err) {
             console.error('Ошибка загрузки устройств:', err);
         }
     }
 
-    // Функция для обновления состояния скролла
-    function updateScrollable() {
-        const body = document.body;
-        const html = document.documentElement;
-        const contentHeight = Math.max(
-            body.scrollHeight,
-            body.offsetHeight,
-            html.clientHeight,
-            html.scrollHeight,
-            html.offsetHeight
-        );
-        const windowHeight = window.innerHeight;
-        
-        if (contentHeight > windowHeight) {
-            // Убеждаемся что скролл включен
-            html.style.overflowY = 'scroll';
-            body.style.overflowY = 'scroll';
-            body.style.height = 'auto';
-            html.style.height = 'auto';
-        } else {
-            // Если контента мало, добавляем минимальную высоту
-            const container = document.querySelector('.container');
-            if (container) {
-                container.style.minHeight = `${windowHeight - 100}px`;
-            }
-        }
-    }
-
     document.getElementById('device-form').addEventListener('submit', async (e) => {
         e.preventDefault();
+        forceScrollActivation();
         
         const id = document.getElementById('device-id').value;
         const deviceData = {
@@ -398,6 +423,7 @@
                 await loadDevices();
                 setTimeout(() => {
                     window.scrollTo({ top: 0, behavior: 'smooth' });
+                    forceScrollActivation();
                 }, 100);
             } else {
                 alert('Не удалось сохранить изменения.');
@@ -408,6 +434,7 @@
     });
 
     function editDevice(id, name, address, model_id, timeout_sec) {
+        forceScrollActivation();
         document.getElementById('form-title').innerText = 'Редактировать установку';
         document.getElementById('device-id').value = id;
         document.getElementById('name').value = name;
@@ -421,6 +448,7 @@
         
         setTimeout(() => {
             window.scrollTo({ top: 0, behavior: 'smooth' });
+            forceScrollActivation();
         }, 100);
     }
 
@@ -432,6 +460,7 @@
             if (res.ok) {
                 await loadDevices();
                 if (document.getElementById('device-id').value === id) resetForm();
+                forceScrollActivation();
             } else {
                 alert('Ошибка при удалении устройства.');
             }
@@ -446,26 +475,46 @@
         document.getElementById('device-form').reset();
         document.getElementById('submit-btn').innerText = 'Сохранить установку';
         document.getElementById('cancel-btn').style.display = 'none';
+        forceScrollActivation();
     }
 
-    // Обновляем состояние при изменении размера окна
-    window.addEventListener('resize', () => {
-        setTimeout(updateScrollable, 200);
-    });
+    // Главная функция активации
+    function mainActivation() {
+        forceScrollActivation();
+        
+        // Множественные попытки активации
+        setTimeout(forceScrollActivation, 100);
+        setTimeout(forceScrollActivation, 300);
+        setTimeout(forceScrollActivation, 500);
+        setTimeout(forceScrollActivation, 1000);
+        setTimeout(forceScrollActivation, 2000);
+        setTimeout(forceScrollActivation, 3000);
+        
+        // Каждые 5 секунд проверяем и активируем
+        setInterval(forceScrollActivation, 5000);
+    }
 
     window.onload = async () => {
         await loadModels();
         await loadDevices();
         
-        // Дополнительная проверка скролла после полной загрузки
-        setTimeout(updateScrollable, 300);
-        setTimeout(updateScrollable, 1000);
+        // Мгновенная активация
+        mainActivation();
         
-        // Принудительное обновление через 2 секунды
-        setTimeout(() => {
-            window.dispatchEvent(new Event('scroll'));
-        }, 2000);
+        // Активация при любом взаимодействии
+        document.addEventListener('click', forceScrollActivation);
+        document.addEventListener('touchstart', forceScrollActivation);
+        document.addEventListener('touchmove', forceScrollActivation);
+        document.addEventListener('scroll', forceScrollActivation);
+        
+        // При изменении размера
+        window.addEventListener('resize', () => {
+            setTimeout(forceScrollActivation, 200);
+        });
     };
+
+    // Еще одна активация через 100мс после полной загрузки
+    setTimeout(mainActivation, 100);
 </script>
 </body>
 </html>
