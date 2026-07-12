@@ -72,18 +72,6 @@
             clear: both;
         }
 
-        /* Скрытый триггер для активации скролла */
-        .scroll-trigger {
-            position: fixed;
-            bottom: 0;
-            left: 0;
-            width: 1px;
-            height: 1px;
-            opacity: 0;
-            pointer-events: none;
-            z-index: -1;
-        }
-
         /* Кнопка "Наверх" */
         #back-to-top {
             position: fixed;
@@ -152,9 +140,6 @@
     </style>
 </head>
 <body>
-
-<!-- Скрытый триггер для активации скролла -->
-<div class="scroll-trigger" id="scrollTrigger"></div>
 
 <div class="page-content-wrapper">
     <div class="container">
@@ -226,9 +211,12 @@
     const API_URL = window.location.origin;
     let availableModels = {};
     let activationAttempts = 0;
+    let isActivated = false;
 
-    // Функция принудительной активации скролла
+    // Функция принудительной активации скролла (однократно)
     function forceScrollActivation() {
+        if (isActivated) return; // Если уже активировано - пропускаем
+        
         // Метод 1: Принудительная установка стилей
         document.documentElement.style.overflowY = 'scroll';
         document.body.style.overflowY = 'scroll';
@@ -260,7 +248,8 @@
         }, 1000);
         
         activationAttempts++;
-        console.log(`Scroll activation attempt ${activationAttempts}`);
+        isActivated = true;
+        console.log(`Scroll activated after ${activationAttempts} attempt(s)`);
     }
 
     // Функция скролла наверх
@@ -284,13 +273,13 @@
         }
     });
 
-    // Перехват касаний для активации скролла
+    // Перехват касаний для активации скролла (только если не активировано)
     document.addEventListener('touchstart', () => {
-        forceScrollActivation();
+        if (!isActivated) forceScrollActivation();
     });
 
     document.addEventListener('click', () => {
-        forceScrollActivation();
+        if (!isActivated) forceScrollActivation();
     });
 
     // Перехват свайпов
@@ -300,10 +289,12 @@
     });
 
     document.addEventListener('touchmove', (e) => {
-        const touchEndY = e.touches[0].clientY;
-        const diff = touchStartY - touchEndY;
-        if (Math.abs(diff) > 10) {
-            forceScrollActivation();
+        if (!isActivated) {
+            const touchEndY = e.touches[0].clientY;
+            const diff = touchStartY - touchEndY;
+            if (Math.abs(diff) > 10) {
+                forceScrollActivation();
+            }
         }
     });
 
@@ -340,7 +331,6 @@
                 const noDataHtml = '<div style="text-align:center; color:#999; padding:20px;">Нет активных установок в работе</div>';
                 tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:#999;">Нет активных установок в работе</td></tr>';
                 cardsContainer.innerHTML = noDataHtml;
-                forceScrollActivation();
                 return;
             }
 
@@ -386,8 +376,6 @@
                 `;
                 cardsContainer.appendChild(card);
             });
-            
-            forceScrollActivation();
         } catch (err) {
             console.error('Ошибка загрузки устройств:', err);
         }
@@ -395,7 +383,6 @@
 
     document.getElementById('device-form').addEventListener('submit', async (e) => {
         e.preventDefault();
-        forceScrollActivation();
         
         const id = document.getElementById('device-id').value;
         const deviceData = {
@@ -423,7 +410,6 @@
                 await loadDevices();
                 setTimeout(() => {
                     window.scrollTo({ top: 0, behavior: 'smooth' });
-                    forceScrollActivation();
                 }, 100);
             } else {
                 alert('Не удалось сохранить изменения.');
@@ -434,7 +420,6 @@
     });
 
     function editDevice(id, name, address, model_id, timeout_sec) {
-        forceScrollActivation();
         document.getElementById('form-title').innerText = 'Редактировать установку';
         document.getElementById('device-id').value = id;
         document.getElementById('name').value = name;
@@ -448,7 +433,6 @@
         
         setTimeout(() => {
             window.scrollTo({ top: 0, behavior: 'smooth' });
-            forceScrollActivation();
         }, 100);
     }
 
@@ -460,7 +444,6 @@
             if (res.ok) {
                 await loadDevices();
                 if (document.getElementById('device-id').value === id) resetForm();
-                forceScrollActivation();
             } else {
                 alert('Ошибка при удалении устройства.');
             }
@@ -475,46 +458,50 @@
         document.getElementById('device-form').reset();
         document.getElementById('submit-btn').innerText = 'Сохранить установку';
         document.getElementById('cancel-btn').style.display = 'none';
-        forceScrollActivation();
-    }
-
-    // Главная функция активации
-    function mainActivation() {
-        forceScrollActivation();
-        
-        // Множественные попытки активации
-        setTimeout(forceScrollActivation, 100);
-        setTimeout(forceScrollActivation, 300);
-        setTimeout(forceScrollActivation, 500);
-        setTimeout(forceScrollActivation, 1000);
-        setTimeout(forceScrollActivation, 2000);
-        setTimeout(forceScrollActivation, 3000);
-        
-        // Каждые 5 секунд проверяем и активируем
-        setInterval(forceScrollActivation, 5000);
     }
 
     window.onload = async () => {
         await loadModels();
         await loadDevices();
         
-        // Мгновенная активация
-        mainActivation();
+        // Активируем скролл с задержками (без интервалов)
+        setTimeout(() => {
+            forceScrollActivation();
+        }, 100);
         
-        // Активация при любом взаимодействии
-        document.addEventListener('click', forceScrollActivation);
-        document.addEventListener('touchstart', forceScrollActivation);
-        document.addEventListener('touchmove', forceScrollActivation);
-        document.addEventListener('scroll', forceScrollActivation);
+        setTimeout(() => {
+            if (!isActivated) forceScrollActivation();
+        }, 300);
+        
+        setTimeout(() => {
+            if (!isActivated) forceScrollActivation();
+        }, 500);
+        
+        setTimeout(() => {
+            if (!isActivated) forceScrollActivation();
+        }, 1000);
+        
+        // Активация при взаимодействии
+        document.addEventListener('click', () => {
+            if (!isActivated) forceScrollActivation();
+        });
+        
+        document.addEventListener('touchstart', () => {
+            if (!isActivated) forceScrollActivation();
+        });
         
         // При изменении размера
         window.addEventListener('resize', () => {
-            setTimeout(forceScrollActivation, 200);
+            setTimeout(() => {
+                if (!isActivated) forceScrollActivation();
+            }, 200);
         });
     };
 
-    // Еще одна активация через 100мс после полной загрузки
-    setTimeout(mainActivation, 100);
+    // Еще одна попытка через 100мс после полной загрузки
+    setTimeout(() => {
+        if (!isActivated) forceScrollActivation();
+    }, 100);
 </script>
 </body>
 </html>
