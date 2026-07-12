@@ -85,6 +85,14 @@ func main() {
 	if controllersPath == "" {
 		controllersPath = "controllers"
 	}
+
+	customControllersPath := os.Getenv("CUSTOM_CONTROLLERS_PATH")
+	if customControllersPath == "" {
+		customControllersPath = "/config/gpu_modbus_custom/"
+	}
+	// Гарантируем создание папки для пользовательских конфигураций
+	_ = os.MkdirAll(customControllersPath, 0755)
+
 	webPath = os.Getenv("WEB_PATH")
 	if webPath == "" {
 		webPath = "web"
@@ -96,7 +104,8 @@ func main() {
 	_ = os.MkdirAll(dataPath, 0755)
 	userDevicesFile = filepath.Join(dataPath, "user_devices.json")
 
-	loadModels(controllersPath)
+	// Передаем в загрузчик встроенный и пользовательский пути
+	loadModels(controllersPath, customControllersPath)
 	initMQTT()
 	loadUserDevices()
 
@@ -132,17 +141,33 @@ func main() {
 	log.Println("Остановка сервиса...")
 }
 
-func loadModels(path string) {
-	files, _ := filepath.Glob(filepath.Join(path, "*.json"))
-	for _, f := range files {
-		data, err := os.ReadFile(f)
+func loadModels(paths ...string) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	for _, path := range paths {
+		files, err := filepath.Glob(filepath.Join(path, "*.json"))
 		if err != nil {
+			log.Printf("Ошибка сканирования директории %s: %v", path, err)
 			continue
 		}
-		var m ControllerModel
-		if err := json.Unmarshal(data, &m); err == nil {
+
+		for _, f := range files {
+			data, err := os.ReadFile(f)
+			if err != nil {
+				log.Printf("Ошибка чтения файла %s: %v", f, err)
+				continue
+			}
+
+			var m ControllerModel
+			if err := json.Unmarshal(data, &m); err != nil {
+				log.Printf("Ошибка парсинга JSON в файле %s: %v", f, err)
+				continue
+			}
+
+			// Запись в мапу. Пользовательские файлы за счет порядка путей перезапишут дефолтные при совпадении ModelID
 			models[m.ModelID] = m
-			log.Printf("Загружена модель: %s", m.Name)
+			log.Printf("Загружена модель: %s [%s] из папки: %s", m.Name, m.ModelID, path)
 		}
 	}
 }
@@ -195,10 +220,14 @@ func saveUserDevices() {
 func handleGetModels(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json")
-	list := []ControllerModel{}
+
+	mu.RLock()
+	list := make([]ControllerModel, 0, len(models))
 	for _, m := range models {
 		list = append(list, m)
 	}
+	mu.RUnlock()
+
 	json.NewEncoder(w).Encode(list)
 }
 
@@ -351,7 +380,10 @@ func initializeSensorsWithZeros(d UserDevice, model ControllerModel) {
 }
 
 func startDevicePolling(d UserDevice) {
+	mu.RLock()
 	model, exists := models[d.ModelID]
+	mu.RUnlock()
+
 	if !exists {
 		log.Printf("Модель %s не найдена для ГПУ %s", d.ModelID, d.Name)
 		return
@@ -419,7 +451,7 @@ func startDevicePolling(d UserDevice) {
 	imbalanceJson, _ := json.Marshal(imbalancePayload)
 	safeMqttPublish(imbalanceConfigTopic, 1, true, imbalanceJson)
 
-	// === НОВЫЙ БЛОК: Инициализация кнопок управления ===
+	// Инициализация кнопок управления
 	cmdChan := make(chan CommandConfig, 5)
 
 	for _, cmd := range model.Commands {
@@ -441,17 +473,16 @@ func startDevicePolling(d UserDevice) {
 		btnJson, _ := json.Marshal(btnPayload)
 		safeMqttPublish(discoveryTopic, 1, true, btnJson)
 
-		// Подписываемся на команды из Home Assistant
+		// Подписываемся на топики управления из Home Assistant
 		capturedCmd := cmd
 		if mqttClient != nil && mqttClient.IsConnected() {
 			mqttClient.Subscribe(commandTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
 				if string(msg.Payload()) == "PRESS" {
-					cmdChan <- capturedCmd // Безопасно передаем команду в главную горутину
+					cmdChan <- capturedCmd
 				}
 			})
 		}
 	}
-	// ===================================================
 
 	initializeSensorsWithZeros(d, model)
 
@@ -480,7 +511,7 @@ func startDevicePolling(d UserDevice) {
 
 		for {
 			select {
-			// === БЛОК 1: Чтение регистров по таймеру ===
+			// === БЛОК 1: Циклический опрос регистров ===
 			case <-ticker.C:
 				if mqttClient == nil || !mqttClient.IsConnected() {
 					continue
@@ -501,7 +532,6 @@ func startDevicePolling(d UserDevice) {
 				}
 
 				deviceReadError := false
-
 				var currentA, currentB, currentC float64
 				var hasCurrentA, hasCurrentB, hasCurrentC bool
 
@@ -519,7 +549,6 @@ func startDevicePolling(d UserDevice) {
 							regType = modbus.INPUT_REGISTER
 						}
 
-						// Проверка разрядности регистра (16 или 32 бита)
 						if reg.Bitrate == 32 {
 							var raw32 []uint16
 							raw32, readErr = client.ReadRegisters(reg.Address, 2, regType)
@@ -578,7 +607,6 @@ func startDevicePolling(d UserDevice) {
 								d.Name, imbalance, currentA, currentB, currentC)
 						}
 					}
-
 					client.Close()
 				}
 
@@ -602,10 +630,8 @@ func startDevicePolling(d UserDevice) {
 						var writeErr error
 
 						if cmd.Type == "coil" {
-							// Для Coil требуется тип bool в библиотеке simonvetter/modbus
 							writeErr = client.WriteCoil(cmd.Address, cmd.Value > 0)
 						} else {
-							// Обычная запись в Holding Register
 							writeErr = client.WriteRegister(cmd.Address, cmd.Value)
 						}
 
@@ -620,9 +646,8 @@ func startDevicePolling(d UserDevice) {
 					}
 				}
 
-			// === БЛОК 3: Остановка устройства ===
+			// === БЛОК 3: Остановка текущего воркера опроса ===
 			case <-stopChan:
-				// Отписываемся от MQTT-топиков команд
 				for _, cmd := range model.Commands {
 					unsubTopic := fmt.Sprintf("gpu/%s/%s/set", d.ID, cmd.ID)
 					mqttClient.Unsubscribe(unsubTopic)
