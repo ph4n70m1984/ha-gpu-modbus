@@ -5,25 +5,27 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Панель управления ГПУ Modbus Мост</title>
     <style>
-        /* --- ФИНАЛЬНЫЙ ФИКС ДЛЯ WEBVIEW HOME ASSISTANT --- */
+        /* --- ЖЕСТКАЯ БЛОКИРОВКА РОДИТЕЛЬСКОГО ОКНА --- */
         html, body { 
             margin: 0; 
             padding: 0;
-            /* Задаем жесткую высоту в 100% от высоты iframe */
-            height: 100%; 
-            width: 100%;
-            
-            /* Разрешаем браузеру прокрутку */
-            overflow-y: auto !important; 
-            overflow-x: hidden;
-            
-            /* КРИТИЧЕСКИЕ СВОЙСТВА ДЛЯ МОБИЛЬНЫХ ПРИЛОЖЕНИЙ: */
-            -webkit-overflow-scrolling: touch !important; /* Инерция на iOS */
-            touch-action: pan-y !important; /* Запрещаем зум, разрешаем только вертикальный скролл */
-            overscroll-behavior-y: contain !important; /* Запрещаем передачу скролла родительскому окну HA */
-            
+            height: 100% !important; 
+            width: 100% !important;
+            overflow: hidden !important; /* Запрещаем скролл для внешнего окна */
             background: #f5f5f5; 
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+        }
+
+        /* --- СОБСТВЕННЫЙ ИЗОЛИРОВАННЫЙ СКРОЛЛ-БОКС --- */
+        .main-scroll-box {
+            width: 100%;
+            height: 100vh; /* Строго высота экрана */
+            overflow-y: scroll !important; /* Принудительный вертикальный скролл */
+            overflow-x: hidden;
+            -webkit-overflow-scrolling: touch !important; /* Плавность для iOS */
+            touch-action: pan-y !important;
+            box-sizing: border-box;
+            padding: 15px;
         }
 
         .container { 
@@ -31,12 +33,11 @@
             margin: 0 auto; 
             background: white; 
             padding: 20px; 
-            /* Добавляем 100px снизу, чтобы точно ничего не перекрывалось менюшкой */
-            padding-bottom: 100px; 
+            padding-bottom: 120px; /* Большой отступ снизу от меню навигации HA */
+            border-radius: 8px; 
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1); 
             box-sizing: border-box; 
-            min-height: 100%; /* Контейнер должен быть не меньше высоты экрана */
         }
-        /* ------------------------------------------------------------- */
 
         /* --- Кнопка "Наверх" --- */
         #back-to-top {
@@ -52,20 +53,14 @@
             box-shadow: 0 4px 10px rgba(0,0,0,0.3);
             font-size: 24px;
             cursor: pointer;
-            display: none; /* Скрыта по умолчанию */
+            display: none; 
             align-items: center;
             justify-content: center;
             z-index: 1000;
             transition: background 0.3s, transform 0.2s;
         }
-        #back-to-top:hover {
-            background: #0288d1;
-            transform: scale(1.05);
-        }
-        #back-to-top:active {
-            transform: scale(0.95);
-        }
-        /* ----------------------- */
+        #back-to-top:hover { background: #0288d1; transform: scale(1.05); }
+        #back-to-top:active { transform: scale(0.95); }
 
         h1, h2 { color: #03a9f4; margin-top: 10px; }
         .form-group { margin-bottom: 15px; }
@@ -99,13 +94,14 @@
         @media (max-width: 768px) {
             .table-container { display: none; }
             .cards-container { display: flex; }
-            /* На мобильных кнопку "Наверх" можно чуть приподнять, чтобы не мешала свайпать */
             #back-to-top { bottom: 80px; right: 20px; }
         }
     </style>
 </head>
 <body>
 
+<!-- Вся страница теперь внутри изолированного контейнера скролла -->
+<div class="main-scroll-box">
     <div class="container">
         <h1>ГПУ Modbus Мост</h1>
         <p style="color: #666; font-size: 14px; margin-bottom: 20px;">Управление конфигурацией промышленных контроллеров ГПУ.</p>
@@ -160,20 +156,21 @@
 
         <div class="cards-container" id="devices-cards-body"></div>
     </div>
+</div>
 
-    <!-- Кнопка "Наверх" -->
-    <button id="back-to-top" onclick="window.scrollTo({ top: 0, behavior: 'smooth' })">
-        &#8593;
-    </button>
+<!-- Кнопка "Наверх" -->
+<button id="back-to-top" onclick="document.querySelector('.main-scroll-box').scrollTo({ top: 0, behavior: 'smooth' })">
+    &#8593;
+</button>
 
 <script>
     const API_URL = window.location.origin;
     let availableModels = {};
 
-    // Логика отображения кнопки "Наверх"
-    window.addEventListener('scroll', () => {
+    // Отслеживаем скролл внутри нашего бокса, а не окна
+    document.querySelector('.main-scroll-box').addEventListener('scroll', (e) => {
         const btn = document.getElementById('back-to-top');
-        if (window.scrollY > 200) {
+        if (e.target.scrollTop > 200) {
             btn.style.display = 'flex';
         } else {
             btn.style.display = 'none';
@@ -290,7 +287,7 @@
             if (res.ok) {
                 resetForm();
                 loadDevices();
-                window.scrollTo({ top: 0, behavior: 'smooth' }); // Возврат наверх после сохранения
+                document.querySelector('.main-scroll-box').scrollTo({ top: 0, behavior: 'smooth' });
             } else {
                 alert('Не удалось сохранить изменения.');
             }
@@ -311,8 +308,8 @@
         document.getElementById('cancel-btn').style.width = '100%';
         document.getElementById('cancel-btn').style.display = 'inline-block';
         
-        // Возвращаем стандартный скролл окна
-        window.scrollTo({ top: 0, behavior: 'smooth' });
+        // Скроллим бокс наверх
+        document.querySelector('.main-scroll-box').scrollTo({ top: 0, behavior: 'smooth' });
     }
 
     async function deleteDevice(id) {
