@@ -18,11 +18,20 @@ import (
 	"github.com/simonvetter/modbus"
 )
 
+type CommandConfig struct {
+	Name    string `json:"name"`
+	ID      string `json:"id"`
+	Address uint16 `json:"address"`
+	Type    string `json:"type"`  // "register" (Holding Register) или "coil"
+	Value   uint16 `json:"value"` // Значение для записи (например, 1 для старта)
+}
+
 type ControllerModel struct {
 	ModelID      string           `json:"model_id"`
 	Name         string           `json:"name"`
 	Manufacturer string           `json:"manufacturer"`
 	Registers    []RegisterConfig `json:"registers"`
+	Commands     []CommandConfig  `json:"commands,omitempty"` // Поддержка команд управления
 }
 
 type RegisterConfig struct {
@@ -30,6 +39,7 @@ type RegisterConfig struct {
 	ID          string  `json:"id"`
 	Address     uint16  `json:"address"`
 	Type        string  `json:"type"`
+	Bitrate     int     `json:"bitrate"` // 16 или 32 бита
 	Unit        string  `json:"unit"`
 	DeviceClass string  `json:"device_class"`
 	Scale       float64 `json:"scale"`
@@ -50,6 +60,14 @@ type HADiscoveryPayload struct {
 	DeviceClass       string         `json:"device_class,omitempty"`
 	UniqueID          string         `json:"unique_id"`
 	Device            map[string]any `json:"device"`
+}
+
+type HAButtonDiscovery struct {
+	Name         string         `json:"name"`
+	CommandTopic string         `json:"command_topic"`
+	PayloadPress string         `json:"payload_press"`
+	UniqueID     string         `json:"unique_id"`
+	Device       map[string]any `json:"device"`
 }
 
 var (
@@ -328,7 +346,6 @@ func initializeSensorsWithZeros(d UserDevice, model ControllerModel) {
 		stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
 		safeMqttPublish(stateTopic, 0, false, "0.00")
 	}
-	// Также обнуляем виртуальный сенсор перекоса токов
 	imbalanceTopic := fmt.Sprintf("gpu/%s/current_imbalance/state", d.ID)
 	safeMqttPublish(imbalanceTopic, 0, false, "0.0")
 }
@@ -351,7 +368,7 @@ func startDevicePolling(d UserDevice) {
 		time.Sleep(1 * time.Second)
 	}
 
-	// Отправка MQTT Discovery для основных регистров
+	// Отправка MQTT Discovery для основных регистров (чтение)
 	for _, reg := range model.Registers {
 		discoveryTopic := fmt.Sprintf("homeassistant/sensor/%s/%s/config", d.ID, reg.ID)
 		stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
@@ -402,6 +419,40 @@ func startDevicePolling(d UserDevice) {
 	imbalanceJson, _ := json.Marshal(imbalancePayload)
 	safeMqttPublish(imbalanceConfigTopic, 1, true, imbalanceJson)
 
+	// === НОВЫЙ БЛОК: Инициализация кнопок управления ===
+	cmdChan := make(chan CommandConfig, 5)
+
+	for _, cmd := range model.Commands {
+		discoveryTopic := fmt.Sprintf("homeassistant/button/%s/%s/config", d.ID, cmd.ID)
+		commandTopic := fmt.Sprintf("gpu/%s/%s/set", d.ID, cmd.ID)
+
+		btnPayload := HAButtonDiscovery{
+			Name:         fmt.Sprintf("%s %s", d.Name, cmd.Name),
+			CommandTopic: commandTopic,
+			PayloadPress: "PRESS",
+			UniqueID:     fmt.Sprintf("%s_%s", d.ID, cmd.ID),
+			Device: map[string]any{
+				"identifiers":  []string{d.ID},
+				"name":         d.Name,
+				"manufacturer": model.Manufacturer,
+				"model":        model.Name,
+			},
+		}
+		btnJson, _ := json.Marshal(btnPayload)
+		safeMqttPublish(discoveryTopic, 1, true, btnJson)
+
+		// Подписываемся на команды из Home Assistant
+		capturedCmd := cmd
+		if mqttClient != nil && mqttClient.IsConnected() {
+			mqttClient.Subscribe(commandTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
+				if string(msg.Payload()) == "PRESS" {
+					cmdChan <- capturedCmd // Безопасно передаем команду в главную горутину
+				}
+			})
+		}
+	}
+	// ===================================================
+
 	initializeSensorsWithZeros(d, model)
 
 	stopChan := make(chan struct{})
@@ -429,6 +480,7 @@ func startDevicePolling(d UserDevice) {
 
 		for {
 			select {
+			// === БЛОК 1: Чтение регистров по таймеру ===
 			case <-ticker.C:
 				if mqttClient == nil || !mqttClient.IsConnected() {
 					continue
@@ -460,13 +512,29 @@ func startDevicePolling(d UserDevice) {
 					}
 				} else {
 					for _, reg := range model.Registers {
-						var raw uint16
+						var val float64
 						var readErr error
-
+						regType := modbus.HOLDING_REGISTER
 						if reg.Type == "input" {
-							raw, readErr = client.ReadRegister(reg.Address, modbus.INPUT_REGISTER)
+							regType = modbus.INPUT_REGISTER
+						}
+
+						// Проверка разрядности регистра (16 или 32 бита)
+						if reg.Bitrate == 32 {
+							var raw32 []uint16
+							raw32, readErr = client.ReadRegisters(reg.Address, 2, regType)
+							if readErr == nil && len(raw32) == 2 {
+								combinedInt := int32(uint32(raw32[0])<<16 | uint32(raw32[1]))
+								val = float64(combinedInt) * reg.Scale
+							} else if readErr == nil {
+								readErr = fmt.Errorf("получено недостаточно регистров")
+							}
 						} else {
-							raw, readErr = client.ReadRegister(reg.Address, modbus.HOLDING_REGISTER)
+							var raw16 uint16
+							raw16, readErr = client.ReadRegister(reg.Address, regType)
+							if readErr == nil {
+								val = float64(raw16) * reg.Scale
+							}
 						}
 
 						stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
@@ -485,7 +553,6 @@ func startDevicePolling(d UserDevice) {
 							linkDown = false
 						}
 
-						val := float64(raw) * reg.Scale
 						safeMqttPublish(stateTopic, 0, false, fmt.Sprintf("%.2f", val))
 
 						switch reg.ID {
@@ -523,7 +590,43 @@ func startDevicePolling(d UserDevice) {
 					}
 				}
 
+			// === БЛОК 2: Запись регистров (Исполнение команд) ===
+			case cmd := <-cmdChan:
+				client, err := modbus.NewClient(&modbus.ClientConfiguration{
+					URL:     "tcp://" + d.Address,
+					Timeout: 2 * time.Second,
+				})
+
+				if err == nil {
+					if err := client.Open(); err == nil {
+						var writeErr error
+
+						if cmd.Type == "coil" {
+							// Для Coil требуется тип bool в библиотеке simonvetter/modbus
+							writeErr = client.WriteCoil(cmd.Address, cmd.Value > 0)
+						} else {
+							// Обычная запись в Holding Register
+							writeErr = client.WriteRegister(cmd.Address, cmd.Value)
+						}
+
+						if writeErr != nil {
+							log.Printf("[%s] Ошибка выполнения команды '%s': %v", d.Name, cmd.Name, writeErr)
+						} else {
+							log.Printf("[%s] УСПЕХ: Команда '%s' выполнена (Адрес: %d, Записано: %d)", d.Name, cmd.Name, cmd.Address, cmd.Value)
+						}
+						client.Close()
+					} else {
+						log.Printf("[%s] Ошибка сокета при выполнении команды '%s': %v", d.Name, cmd.Name, err)
+					}
+				}
+
+			// === БЛОК 3: Остановка устройства ===
 			case <-stopChan:
+				// Отписываемся от MQTT-топиков команд
+				for _, cmd := range model.Commands {
+					unsubTopic := fmt.Sprintf("gpu/%s/%s/set", d.ID, cmd.ID)
+					mqttClient.Unsubscribe(unsubTopic)
+				}
 				return
 			}
 		}

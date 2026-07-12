@@ -53,5 +53,28 @@
       "device_class": "power",
       "scale": 1.0
     }
+  ],
+  "commands": [
+    {
+      "name": "Дистанционный ПУСК",
+      "id": "cmd_start",
+      "address": 40100,
+      "type": "register",
+      "value": 1
+    },
+    {
+      "name": "Дистанционный ОСТАНОВ",
+      "id": "cmd_stop",
+      "address": 40100,
+      "type": "register",
+      "value": 2
+    },
+    {
+      "name": "Сброс аварий",
+      "id": "cmd_reset",
+      "address": 15,
+      "type": "coil",
+      "value": 1
+    }
   ]
 }
