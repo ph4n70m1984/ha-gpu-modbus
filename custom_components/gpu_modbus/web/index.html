@@ -2,38 +2,44 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Панель управления ГПУ Modbus Мост</title>
     <style>
-        /* --- ФИКС СКРОЛЛА ДЛЯ МОБИЛЬНОГО ПРИЛОЖЕНИЯ HOME ASSISTANT --- */
+        /* --- ЖЕСТКИЙ ФИКС СКРОЛЛА ДЛЯ IFRAME HOME ASSISTANT --- */
         html, body { 
             margin: 0; 
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden !important; /* Строго блокируем системный скролл */
+            background: #f5f5f5; 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+        }
+
+        /* Специальная обертка, внутри которой и будет происходить скролл */
+        .scroll-wrapper {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            overflow-y: auto !important;
+            -webkit-overflow-scrolling: touch; /* Включаем инерцию скролла на мобильных */
             padding: 15px;
             box-sizing: border-box;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
-            background: #f5f5f5; 
-            color: #333; 
-            
-            /* Принудительно разрешаем скролл в WebView */
-            min-height: 100% !important; 
-            height: auto !important;
-            overflow-y: auto !important;
-            overflow-x: hidden;
-            -webkit-overflow-scrolling: touch; /* Плавный тач-скролл для iOS/Android */
         }
-        
+        /* ------------------------------------------------------------- */
+
         .container { 
             max-width: 900px; 
             margin: 0 auto; 
             background: white; 
             padding: 20px; 
-            /* Дополнительный отступ снизу, чтобы мобильная навигация HA не обрезала кнопку */
-            padding-bottom: 60px; 
+            padding-bottom: 80px; /* Увеличенный отступ снизу от меню навигации HA */
             border-radius: 8px; 
             box-shadow: 0 2px 4px rgba(0,0,0,0.1); 
             box-sizing: border-box; 
         }
-        /* ------------------------------------------------------------- */
 
         h1, h2 { color: #03a9f4; margin-top: 10px; }
         .form-group { margin-bottom: 15px; }
@@ -66,7 +72,6 @@
         .card-actions { display: flex; gap: 10px; margin-top: 15px; }
         .card-actions button { flex: 1; text-align: center; padding: 10px; font-size: 14px; }
 
-        /* --- Супер-адаптив: переключение режимов по медиа-запросу --- */
         @media (max-width: 768px) {
             .table-container { display: none; }
             .cards-container { display: flex; }
@@ -75,66 +80,61 @@
 </head>
 <body>
 
-<div class="container">
-    <h1>ГПУ Modbus Мост</h1>
-    <p style="color: #666; font-size: 14px; margin-bottom: 20px;">Управление конфигурацией промышленных контроллеров ГПУ.</p>
+<!-- Добавлена новая обертка для скролла -->
+<div class="scroll-wrapper">
+    <div class="container">
+        <h1>ГПУ Modbus Мост</h1>
+        <p style="color: #666; font-size: 14px; margin-bottom: 20px;">Управление конфигурацией промышленных контроллеров ГПУ.</p>
 
-    <hr>
+        <hr>
 
-    <h2 id="form-title">Добавить новую установку</h2>
-    <form id="device-form">
-        <input type="hidden" id="device-id" value="">
+        <h2 id="form-title">Добавить новую установку</h2>
+        <form id="device-form">
+            <input type="hidden" id="device-id" value="">
+            
+            <div class="form-group">
+                <label for="name">Название ГПУ:</label>
+                <input type="text" id="name" placeholder="Например, ГПУ-1" required>
+            </div>
+            <div class="form-group">
+                <label for="address">Modbus TCP Адрес (IP:Порт):</label>
+                <input type="text" id="address" placeholder="Например, 192.168.1.100:502" required>
+            </div>
+            <div class="form-group">
+                <label for="model_id">Профиль контроллера:</label>
+                <select id="model_id" required></select>
+            </div>
+            <div class="form-group">
+                <label for="timeout_sec">Таймаут отсутствия связи (секунды):</label>
+                <input type="number" id="timeout_sec" value="10" min="5" required>
+            </div>
+            
+            <div style="display: flex; gap: 10px; margin-top: 20px;">
+                <button type="submit" id="submit-btn" style="flex: 2;">Сохранить установку</button>
+                <button type="button" id="cancel-btn" class="btn-secondary" style="display:none; flex: 1;" onclick="resetForm()">Отмена</button>
+            </div>
+        </form>
+
+        <hr>
+
+        <h2>Текущие установки в работе</h2>
         
-        <div class="form-group">
-            <label for="name">Название ГПУ:</label>
-            <input type="text" id="name" placeholder="Например, ГПУ-1" required>
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Название</th>
+                        <th>Адрес Modbus</th>
+                        <th>Контроллер</th>
+                        <th>Таймаут</th>
+                        <th>Действия</th>
+                    </tr>
+                </thead>
+                <tbody id="devices-table-body"></tbody>
+            </table>
         </div>
-        <div class="form-group">
-            <label for="address">Modbus TCP Адрес (IP:Порт):</label>
-            <input type="text" id="address" placeholder="Например, 192.168.1.100:502" required>
-        </div>
-        <div class="form-group">
-            <label for="model_id">Профиль контроллера:</label>
-            <select id="model_id" required>
-                <!-- Заполняется динамически -->
-            </select>
-        </div>
-        <div class="form-group">
-            <label for="timeout_sec">Таймаут отсутствия связи (секунды):</label>
-            <input type="number" id="timeout_sec" value="10" min="5" required>
-        </div>
-        
-        <div style="display: flex; gap: 10px; margin-top: 20px;">
-            <button type="submit" id="submit-btn" style="flex: 2;">Сохранить установку</button>
-            <button type="button" id="cancel-btn" class="btn-secondary" style="display:none; flex: 1;" onclick="resetForm()">Отмена</button>
-        </div>
-    </form>
 
-    <hr>
-
-    <h2>Текущие установки в работе</h2>
-    
-    <!-- 1. Отображение ТАБЛИЦЕЙ (для ПК) -->
-    <div class="table-container">
-        <table>
-            <thead>
-                <tr>
-                    <th>Название</th>
-                    <th>Адрес Modbus</th>
-                    <th>Контроллер</th>
-                    <th>Таймаут</th>
-                    <th>Действия</th>
-                </tr>
-            </thead>
-            <tbody id="devices-table-body">
-                <!-- Заполняется динамически -->
-            </tbody>
-        </table>
-    </div>
-
-    <!-- 2. Отображение КАРТОЧКАМИ (для мобильных телефонов и узких iframe) -->
-    <div class="cards-container" id="devices-cards-body">
-        <!-- Заполняется динамически -->
+        <div class="cards-container" id="devices-cards-body"></div>
     </div>
 </div>
 
@@ -179,7 +179,6 @@
             }
 
             devices.forEach(d => {
-                // Рендеринг строки таблицы (ПК)
                 let tr = document.createElement('tr');
                 tr.innerHTML = `
                     <td><strong>${d.name}</strong></td>
@@ -195,7 +194,6 @@
                 `;
                 tbody.appendChild(tr);
 
-                // Рендеринг карточки (Мобильные)
                 let card = document.createElement('div');
                 card.className = 'device-card';
                 card.innerHTML = `
@@ -274,7 +272,8 @@
         document.getElementById('cancel-btn').style.width = '100%';
         document.getElementById('cancel-btn').style.display = 'inline-block';
         
-        window.scrollTo({ top: 0, behavior: 'smooth' });
+        // Скроллим внутренний враппер наверх вместо window
+        document.querySelector('.scroll-wrapper').scrollTo({ top: 0, behavior: 'smooth' });
     }
 
     async function deleteDevice(id) {
