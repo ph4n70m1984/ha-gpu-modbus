@@ -1,10 +1,218 @@
 {
   "model_id": "deif_agc150",
-  "name": "DEIF AGC 150",
+  "name": "DEIF AGC 150 Series",
   "manufacturer": "DEIF",
   "registers": [
-    {"name": "Активная мощность", "id": "active_power", "address": 500, "type": "holding", "unit": "kW", "device_class": "power", "scale": 0.1},
-    {"name": "Обороты двигателя", "id": "engine_rpm", "address": 512, "type": "holding", "unit": "RPM", "device_class": "", "scale": 1.0},
-    {"name": "Давление масла", "id": "oil_pressure", "address": 520, "type": "holding", "unit": "bar", "device_class": "pressure", "scale": 0.01}
+    {
+      "name": "Линейное напряжение L1-L2",
+      "id": "voltage_l1_l2",
+      "address": 501,
+      "type": "input",
+      "bitrate": 16,
+      "unit": "V",
+      "device_class": "voltage",
+      "scale": 1.0
+    },
+    {
+      "name": "Линейное напряжение L2-L3",
+      "id": "voltage_l2_l3",
+      "address": 502,
+      "type": "input",
+      "bitrate": 16,
+      "unit": "V",
+      "device_class": "voltage",
+      "scale": 1.0
+    },
+    {
+      "name": "Линейное напряжение L3-L1",
+      "id": "voltage_l3_l1",
+      "address": 503,
+      "type": "input",
+      "bitrate": 16,
+      "unit": "V",
+      "device_class": "voltage",
+      "scale": 1.0
+    },
+    {
+      "name": "Фазовое напряжение L1-N",
+      "id": "voltage_l1_n",
+      "address": 504,
+      "type": "input",
+      "bitrate": 16,
+      "unit": "V",
+      "device_class": "voltage",
+      "scale": 1.0
+    },
+    {
+      "name": "Фазовое напряжение L2-N",
+      "id": "voltage_l2_n",
+      "address": 505,
+      "type": "input",
+      "bitrate": 16,
+      "unit": "V",
+      "device_class": "voltage",
+      "scale": 1.0
+    },
+    {
+      "name": "Фазовое напряжение L3-N",
+      "id": "voltage_l3_n",
+      "address": 506,
+      "type": "input",
+      "bitrate": 16,
+      "unit": "V",
+      "device_class": "voltage",
+      "scale": 1.0
+    },
+    {
+      "name": "Частота сети",
+      "id": "frequency",
+      "address": 507,
+      "type": "input",
+      "bitrate": 16,
+      "unit": "Hz",
+      "device_class": "frequency",
+      "scale": 0.01
+    },
+    {
+      "name": "Ток фазы А",
+      "id": "current_a",
+      "address": 513,
+      "type": "input",
+      "bitrate": 16,
+      "unit": "A",
+      "device_class": "current",
+      "scale": 1.0
+    },
+    {
+      "name": "Ток фазы B",
+      "id": "current_b",
+      "address": 514,
+      "type": "input",
+      "bitrate": 16,
+      "unit": "A",
+      "device_class": "current",
+      "scale": 1.0
+    },
+    {
+      "name": "Ток фазы C",
+      "id": "current_c",
+      "address": 515,
+      "type": "input",
+      "bitrate": 16,
+      "unit": "A",
+      "device_class": "current",
+      "scale": 1.0
+    },
+    {
+      "name": "Активная мощность суммарная",
+      "id": "active_power_total",
+      "address": 519,
+      "type": "input",
+      "bitrate": 16,
+      "unit": "kW",
+      "device_class": "power",
+      "scale": 1.0
+    },
+    {
+      "name": "Реактивная мощность суммарная",
+      "id": "reactive_power_total",
+      "address": 523,
+      "type": "input",
+      "bitrate": 16,
+      "unit": "kVAr",
+      "device_class": "power",
+      "scale": 1.0
+    },
+    {
+      "name": "Полная мощность суммарная",
+      "id": "apparent_power_total",
+      "address": 527,
+      "type": "input",
+      "bitrate": 16,
+      "unit": "kVA",
+      "device_class": "power",
+      "scale": 1.0
+    },
+    {
+      "name": "Обороты двигателя",
+      "id": "engine_speed",
+      "address": 593,
+      "type": "input",
+      "bitrate": 16,
+      "unit": "rpm",
+      "scale": 1.0
+    },
+    {
+      "name": "Температура охлаждающей жидкости",
+      "id": "coolant_temp",
+      "address": 594,
+      "type": "input",
+      "bitrate": 16,
+      "unit": "°C",
+      "device_class": "temperature",
+      "scale": 0.1
+    },
+    {
+      "name": "Давление масла двигателя",
+      "id": "oil_pressure",
+      "address": 595,
+      "type": "input",
+      "bitrate": 16,
+      "unit": "bar",
+      "device_class": "pressure",
+      "scale": 0.01
+    },
+    {
+      "name": "Температура масла",
+      "id": "oil_temp",
+      "address": 597,
+      "type": "input",
+      "bitrate": 16,
+      "unit": "°C",
+      "device_class": "temperature",
+      "scale": 0.1
+    },
+    {
+      "name": "Уровень моторного масла",
+      "id": "oil_level",
+      "address": 615,
+      "type": "input",
+      "bitrate": 16,
+      "unit": "%",
+      "scale": 0.1
+    },
+    {
+      "name": "Общая выработка активной энергии",
+      "id": "energy_active_total",
+      "address": 536,
+      "type": "input",
+      "bitrate": 32,
+      "unit": "kWh",
+      "device_class": "energy",
+      "scale": 1.0
+    }
+  ],
+  "commands": [
+    {
+      "name": "Дистанционный ПУСК ГПУ",
+      "id": "cmd_start",
+      "address": 0,
+      "type": "coil",
+      "value": 1
+    },
+    {
+      "name": "Дистанционный ОСТАНОВ ГПУ",
+      "id": "cmd_stop",
+      "address": 3,
+      "type": "coil",
+      "value": 1
+    },
+    {
+      "name": "Сброс ошибок (Квитирование)",
+      "id": "cmd_reset",
+      "address": 9,
+      "type": "coil",
+      "value": 1
+    }
   ]
 }

@@ -1,0 +1,240 @@
+{
+  "model_id": "smartgen_hgm6100",
+  "name": "SmartGen HGM6100N / HGM6100CAN",
+  "manufacturer": "SmartGen",
+  "registers": [
+    {
+      "name": "Фазовое напряжение генератора Ua",
+      "id": "gen_voltage_a",
+      "address": 7,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "V",
+      "device_class": "voltage",
+      "scale": 1.0
+    },
+    {
+      "name": "Фазовое напряжение генератора Ub",
+      "id": "gen_voltage_b",
+      "address": 8,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "V",
+      "device_class": "voltage",
+      "scale": 1.0
+    },
+    {
+      "name": "Фазовое напряжение генератора Uc",
+      "id": "gen_voltage_c",
+      "address": 9,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "V",
+      "device_class": "voltage",
+      "scale": 1.0
+    },
+    {
+      "name": "Линейное напряжение генератора Uab",
+      "id": "gen_voltage_ab",
+      "address": 10,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "V",
+      "device_class": "voltage",
+      "scale": 1.0
+    },
+    {
+      "name": "Линейное напряжение генератора Ubc",
+      "id": "gen_voltage_bc",
+      "address": 11,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "V",
+      "device_class": "voltage",
+      "scale": 1.0
+    },
+    {
+      "name": "Линейное напряжение генератора Uca",
+      "id": "gen_voltage_ca",
+      "address": 12,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "V",
+      "device_class": "voltage",
+      "scale": 1.0
+    },
+    {
+      "name": "Частота генератора",
+      "id": "frequency",
+      "address": 13,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "Hz",
+      "device_class": "frequency",
+      "scale": 0.1
+    },
+    {
+      "name": "Ток фазы А",
+      "id": "current_a",
+      "address": 14,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "A",
+      "device_class": "current",
+      "scale": 0.1
+    },
+    {
+      "name": "Ток фазы B",
+      "id": "current_b",
+      "address": 15,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "A",
+      "device_class": "current",
+      "scale": 0.1
+    },
+    {
+      "name": "Ток фазы C",
+      "id": "current_c",
+      "address": 16,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "A",
+      "device_class": "current",
+      "scale": 0.1
+    },
+    {
+      "name": "Температура охлаждающей жидкости",
+      "id": "coolant_temp",
+      "address": 17,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "°C",
+      "device_class": "temperature",
+      "scale": 1.0
+    },
+    {
+      "name": "Давление масла двигателя",
+      "id": "oil_pressure",
+      "address": 19,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "kPa",
+      "device_class": "pressure",
+      "scale": 1.0
+    },
+    {
+      "name": "Уровень топлива",
+      "id": "fuel_level",
+      "address": 21,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "%",
+      "scale": 1.0
+    },
+    {
+      "name": "Обороты двигателя",
+      "id": "engine_speed",
+      "address": 23,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "rpm",
+      "scale": 1.0
+    },
+    {
+      "name": "Напряжение аккумулятора",
+      "id": "battery_voltage",
+      "address": 24,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "V",
+      "device_class": "voltage",
+      "scale": 0.1
+    },
+    {
+      "name": "Напряжение зарядного генератора D+",
+      "id": "d_plus_voltage",
+      "address": 25,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "V",
+      "device_class": "voltage",
+      "scale": 0.1
+    },
+    {
+      "name": "Активная мощность суммарная",
+      "id": "active_power",
+      "address": 26,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "kW",
+      "device_class": "power",
+      "scale": 1.0
+    },
+    {
+      "name": "Реактивная мощность суммарная",
+      "id": "reactive_power",
+      "address": 27,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "kvar",
+      "device_class": "power",
+      "scale": 1.0
+    },
+    {
+      "name": "Коэффициент мощности (Cos phi)",
+      "id": "power_factor",
+      "address": 29,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "",
+      "scale": 0.01
+    },
+    {
+      "name": "Статус контроллера (код)",
+      "id": "running_status",
+      "address": 34,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "",
+      "scale": 1.0
+    }
+  ],
+  "commands": [
+    {
+      "name": "Дистанционный ПУСК ГПУ",
+      "id": "cmd_start",
+      "address": 0,
+      "type": "coil",
+      "value": 1
+    },
+    {
+      "name": "Дистанционный ОСТАНОВ ГПУ",
+      "id": "cmd_stop",
+      "address": 1,
+      "type": "coil",
+      "value": 1
+    },
+    {
+      "name": "Режим ТЕСТ",
+      "id": "cmd_mode_test",
+      "address": 2,
+      "type": "coil",
+      "value": 1
+    },
+    {
+      "name": "Режим АВТО",
+      "id": "cmd_mode_auto",
+      "address": 3,
+      "type": "coil",
+      "value": 1
+    },
+    {
+      "name": "Режим РУЧНОЙ",
+      "id": "cmd_mode_manual",
+      "address": 4,
+      "type": "coil",
+      "value": 1
+    }
+  ]
+}
