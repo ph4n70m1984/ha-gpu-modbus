@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>Панель управления ГПУ Modbus Мост</title>
     <style>
         /* --- ТОТАЛЬНЫЙ СБРОС И ВЗЛОМ ВЫСОТЫ ДЛЯ IFRAME В HA --- */
@@ -12,7 +12,7 @@
             height: auto !important; 
             min-height: 100% !important;
             width: 100% !important;
-            overflow-y: scroll !important;
+            overflow-y: auto !important;
             overflow-x: hidden !important;
             -webkit-overflow-scrolling: touch !important;
             touch-action: auto !important;
@@ -23,7 +23,7 @@
 
         body {
             position: relative !important;
-            overflow-y: scroll !important;
+            overflow-y: auto !important;
             -webkit-overflow-scrolling: touch !important;
         }
 
@@ -50,23 +50,9 @@
             position: relative;
             min-height: 500px;
             overflow: visible !important;
-        }
-
-        /* Критический спейсер для выталкивания контента */
-        .webview-spacer {
-            height: 400px !important;
-            width: 100%;
-            display: block;
-            clear: both;
-            position: relative;
-            pointer-events: none;
-        }
-
-        .mobile-spacer {
-            height: 200px !important;
-            width: 100%;
-            display: block;
-            clear: both;
+            
+            /* Динамический аккуратный отступ внизу вместо огромных спейсеров */
+            padding-bottom: calc(80px + env(safe-area-inset-bottom)) !important; 
         }
 
         #back-to-top {
@@ -151,14 +137,12 @@
             .table-container { display: none; }
             .cards-container { display: flex; }
             #back-to-top { bottom: 80px; right: 20px; }
-            .webview-spacer { height: 500px !important; }
-            .mobile-spacer { height: 300px !important; }
+            .container { padding-bottom: calc(100px + env(safe-area-inset-bottom)) !important; }
         }
 
         @media (max-width: 480px) {
             .page-content-wrapper { padding: 10px; }
-            .container { padding: 15px; }
-            .webview-spacer { height: 600px !important; }
+            .container { padding: 15px; padding-bottom: calc(120px + env(safe-area-inset-bottom)) !important; }
         }
     </style>
 </head>
@@ -218,9 +202,6 @@
         </div>
 
         <div class="cards-container" id="devices-cards-body"></div>
-        
-        <div class="webview-spacer"></div>
-        <div class="mobile-spacer"></div>
     </div>
 </div>
 
@@ -241,19 +222,15 @@
         }, 100);
     }
 
-    // Простая активация скролла без перехвата событий
     function activateScroll() {
-        // Устанавливаем стили
-        document.documentElement.style.overflowY = 'scroll';
-        document.body.style.overflowY = 'scroll';
+        document.documentElement.style.overflowY = 'auto';
+        document.body.style.overflowY = 'auto';
         document.documentElement.style.height = 'auto';
         document.body.style.height = 'auto';
         
-        // Маленький трюк для пробуждения WebView
         window.scrollTo(0, 1);
         setTimeout(() => window.scrollTo(0, 0), 50);
         
-        // Создаем и сразу удаляем элемент
         const trigger = document.createElement('div');
         trigger.style.cssText = 'position:fixed;bottom:0;left:0;width:1px;height:1px;opacity:0;';
         document.body.appendChild(trigger);
@@ -263,7 +240,6 @@
         console.log(`Scroll activation attempt ${activationAttempts}`);
     }
 
-    // Обработка скролла для кнопки "Наверх"
     window.addEventListener('scroll', () => {
         const btn = document.getElementById('back-to-top');
         const scrollPosition = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
@@ -275,13 +251,10 @@
         }
     });
 
-    // Только одна активация скролла при загрузке
     window.addEventListener('load', function() {
-        // Множественные попытки с задержкой
         setTimeout(activateScroll, 100);
         setTimeout(activateScroll, 300);
-        setTimeout(activateScroll, 500);
-        setTimeout(activateScroll, 1000);
+        setTimeout(activateScroll, 600);
     });
 
     async function loadModels() {
@@ -449,11 +422,7 @@
     window.onload = async () => {
         await loadModels();
         await loadDevices();
-        
-        // Активация скролла с задержкой после загрузки контента
         setTimeout(activateScroll, 200);
-        setTimeout(activateScroll, 500);
-        setTimeout(activateScroll, 1000);
     };
 </script>
 </body>
