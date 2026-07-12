@@ -9,33 +9,27 @@
         html, body { 
             margin: 0 !important; 
             padding: 0 !important;
-            /* Никаких жестких 100% или 100vh! Разрешаем документу бесконечно расти вниз */
             height: auto !important; 
             min-height: 100% !important;
             width: 100% !important;
-            
-            /* Принудительный глобальный скролл на самом верхнем уровне */
-            overflow: auto !important;
             overflow-y: scroll !important;
             overflow-x: hidden !important;
-            
             -webkit-overflow-scrolling: touch !important;
             touch-action: auto !important;
             overscroll-behavior-y: auto !important;
-            
             background: #f5f5f5; 
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
         }
 
-        /* Основной контейнер страницы, который заставит фрейм раздвинуться */
+        /* Основной контейнер страницы */
         .page-content-wrapper {
-            display: flex;
-            flex-direction: column;
+            display: block;
             width: 100%;
             height: auto !important;
             min-height: 100vh !important;
             box-sizing: border-box;
             padding: 15px;
+            position: relative;
         }
 
         .container { 
@@ -47,18 +41,29 @@
             border-radius: 8px; 
             box-shadow: 0 2px 4px rgba(0,0,0,0.1); 
             box-sizing: border-box; 
-            flex-grow: 1; /* Растягиваем до самого низа */
+            position: relative;
+            min-height: 500px;
         }
 
-        /* --- КРИТИЧЕСКИЙ СПЕЙСЕР ДЛЯ ВЫТАЛКИВАНИЯ КАРТОЧЕК --- */
+        /* Критический спейсер для выталкивания контента */
         .webview-spacer {
-            height: 250px !important; /* Гарантированный запас высоты для скрытия зоны обреза */
+            height: 300px !important;
+            width: 100%;
+            display: block;
+            clear: both;
+            position: relative;
+            pointer-events: none;
+        }
+
+        /* Дополнительный спейсер для мобильных устройств */
+        .mobile-spacer {
+            height: 150px !important;
             width: 100%;
             display: block;
             clear: both;
         }
 
-        /* --- Кнопка "Наверх" --- */
+        /* Кнопка "Наверх" */
         #back-to-top {
             position: fixed;
             bottom: 30px;
@@ -75,7 +80,7 @@
             display: none; 
             align-items: center;
             justify-content: center;
-            z-index: 1000;
+            z-index: 9999;
             transition: background 0.3s, transform 0.2s;
         }
         #back-to-top:hover { background: #0288d1; transform: scale(1.05); }
@@ -110,10 +115,25 @@
         .card-actions { display: flex; gap: 10px; margin-top: 15px; }
         .card-actions button { flex: 1; text-align: center; padding: 10px; font-size: 14px; }
 
+        /* Специальные стили для WebView в HA */
+        .ha-webview-fix {
+            position: relative;
+            z-index: 1;
+        }
+
         @media (max-width: 768px) {
             .table-container { display: none; }
             .cards-container { display: flex; }
             #back-to-top { bottom: 80px; right: 20px; }
+            .webview-spacer { height: 400px !important; }
+            .mobile-spacer { height: 200px !important; }
+        }
+
+        /* Для очень маленьких экранов */
+        @media (max-width: 480px) {
+            .page-content-wrapper { padding: 10px; }
+            .container { padding: 15px; }
+            .webview-spacer { height: 450px !important; }
         }
     </style>
 </head>
@@ -174,28 +194,63 @@
 
         <div class="cards-container" id="devices-cards-body"></div>
         
-        <!-- Распорка под карточками внутри белого контейнера -->
+        <!-- Спейсеры для выталкивания контента в WebView -->
         <div class="webview-spacer"></div>
+        <div class="mobile-spacer"></div>
     </div>
 </div>
 
 <!-- Кнопка "Наверх" -->
-<button id="back-to-top" onclick="window.scrollTo({ top: 0, behavior: 'smooth' })">
+<button id="back-to-top" onclick="scrollToTop()">
     &#8593;
 </button>
 
 <script>
     const API_URL = window.location.origin;
     let availableModels = {};
+    let isScrolling = false;
 
-    // Возвращаем слежение на глобальное окно браузера/фрейма
+    // Функция скролла наверх с принудительным обновлением
+    function scrollToTop() {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        // Принудительно обновляем позицию скролла для WebView
+        setTimeout(() => {
+            document.documentElement.scrollTop = 0;
+            document.body.scrollTop = 0;
+        }, 100);
+    }
+
+    // Улучшенная обработка скролла
     window.addEventListener('scroll', () => {
         const btn = document.getElementById('back-to-top');
-        if (window.scrollY > 200 || document.documentElement.scrollTop > 200) {
+        const scrollPosition = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+        
+        if (scrollPosition > 200) {
             btn.style.display = 'flex';
         } else {
             btn.style.display = 'none';
         }
+    });
+
+    // Принудительная проверка скролла при загрузке
+    document.addEventListener('DOMContentLoaded', () => {
+        // Проверяем возможность скролла
+        const checkScroll = () => {
+            const bodyHeight = document.body.scrollHeight;
+            const windowHeight = window.innerHeight;
+            
+            // Если контента больше чем видимая область, обеспечиваем возможность скролла
+            if (bodyHeight > windowHeight) {
+                document.documentElement.style.overflowY = 'scroll';
+                document.body.style.overflowY = 'scroll';
+            }
+        };
+        
+        // Проверяем после загрузки контента
+        setTimeout(checkScroll, 500);
+        
+        // И повторная проверка через секунду
+        setTimeout(checkScroll, 1000);
     });
 
     async function loadModels() {
@@ -231,6 +286,8 @@
                 const noDataHtml = '<div style="text-align:center; color:#999; padding:20px;">Нет активных установок в работе</div>';
                 tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:#999;">Нет активных установок в работе</td></tr>';
                 cardsContainer.innerHTML = noDataHtml;
+                // Обновляем проверку скролла
+                setTimeout(() => updateScrollable(), 100);
                 return;
             }
 
@@ -276,8 +333,39 @@
                 `;
                 cardsContainer.appendChild(card);
             });
+            
+            // Обновляем проверку скролла после загрузки контента
+            setTimeout(() => updateScrollable(), 200);
         } catch (err) {
             console.error('Ошибка загрузки устройств:', err);
+        }
+    }
+
+    // Функция для обновления состояния скролла
+    function updateScrollable() {
+        const body = document.body;
+        const html = document.documentElement;
+        const contentHeight = Math.max(
+            body.scrollHeight,
+            body.offsetHeight,
+            html.clientHeight,
+            html.scrollHeight,
+            html.offsetHeight
+        );
+        const windowHeight = window.innerHeight;
+        
+        if (contentHeight > windowHeight) {
+            // Убеждаемся что скролл включен
+            html.style.overflowY = 'scroll';
+            body.style.overflowY = 'scroll';
+            body.style.height = 'auto';
+            html.style.height = 'auto';
+        } else {
+            // Если контента мало, добавляем минимальную высоту
+            const container = document.querySelector('.container');
+            if (container) {
+                container.style.minHeight = `${windowHeight - 100}px`;
+            }
         }
     }
 
@@ -307,8 +395,10 @@
 
             if (res.ok) {
                 resetForm();
-                loadDevices();
-                window.scrollTo({ top: 0, behavior: 'smooth' });
+                await loadDevices();
+                setTimeout(() => {
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                }, 100);
             } else {
                 alert('Не удалось сохранить изменения.');
             }
@@ -329,7 +419,9 @@
         document.getElementById('cancel-btn').style.width = '100%';
         document.getElementById('cancel-btn').style.display = 'inline-block';
         
-        window.scrollTo({ top: 0, behavior: 'smooth' });
+        setTimeout(() => {
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        }, 100);
     }
 
     async function deleteDevice(id) {
@@ -338,7 +430,7 @@
         try {
             const res = await fetch(`${API_URL}/api/devices?id=${id}`, { method: 'DELETE' });
             if (res.ok) {
-                loadDevices();
+                await loadDevices();
                 if (document.getElementById('device-id').value === id) resetForm();
             } else {
                 alert('Ошибка при удалении устройства.');
@@ -356,9 +448,23 @@
         document.getElementById('cancel-btn').style.display = 'none';
     }
 
+    // Обновляем состояние при изменении размера окна
+    window.addEventListener('resize', () => {
+        setTimeout(updateScrollable, 200);
+    });
+
     window.onload = async () => {
         await loadModels();
         await loadDevices();
+        
+        // Дополнительная проверка скролла после полной загрузки
+        setTimeout(updateScrollable, 300);
+        setTimeout(updateScrollable, 1000);
+        
+        // Принудительное обновление через 2 секунды
+        setTimeout(() => {
+            window.dispatchEvent(new Event('scroll'));
+        }, 2000);
     };
 </script>
 </body>
