@@ -38,6 +38,35 @@
         }
         /* ------------------------------------------------------------- */
 
+        /* --- Кнопка "Наверх" --- */
+        #back-to-top {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            background: #03a9f4;
+            color: white;
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            border: none;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+            font-size: 24px;
+            cursor: pointer;
+            display: none; /* Скрыта по умолчанию */
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            transition: background 0.3s, transform 0.2s;
+        }
+        #back-to-top:hover {
+            background: #0288d1;
+            transform: scale(1.05);
+        }
+        #back-to-top:active {
+            transform: scale(0.95);
+        }
+        /* ----------------------- */
+
         h1, h2 { color: #03a9f4; margin-top: 10px; }
         .form-group { margin-bottom: 15px; }
         label { display: block; margin-bottom: 5px; font-weight: bold; font-size: 14px; }
@@ -70,12 +99,13 @@
         @media (max-width: 768px) {
             .table-container { display: none; }
             .cards-container { display: flex; }
+            /* На мобильных кнопку "Наверх" можно чуть приподнять, чтобы не мешала свайпать */
+            #back-to-top { bottom: 80px; right: 20px; }
         }
     </style>
 </head>
 <body>
 
-<!-- Добавлена новая обертка для скролла -->
     <div class="container">
         <h1>ГПУ Modbus Мост</h1>
         <p style="color: #666; font-size: 14px; margin-bottom: 20px;">Управление конфигурацией промышленных контроллеров ГПУ.</p>
@@ -131,10 +161,24 @@
         <div class="cards-container" id="devices-cards-body"></div>
     </div>
 
+    <!-- Кнопка "Наверх" -->
+    <button id="back-to-top" onclick="window.scrollTo({ top: 0, behavior: 'smooth' })">
+        &#8593;
+    </button>
 
 <script>
     const API_URL = window.location.origin;
     let availableModels = {};
+
+    // Логика отображения кнопки "Наверх"
+    window.addEventListener('scroll', () => {
+        const btn = document.getElementById('back-to-top');
+        if (window.scrollY > 200) {
+            btn.style.display = 'flex';
+        } else {
+            btn.style.display = 'none';
+        }
+    });
 
     async function loadModels() {
         try {
@@ -246,6 +290,7 @@
             if (res.ok) {
                 resetForm();
                 loadDevices();
+                window.scrollTo({ top: 0, behavior: 'smooth' }); // Возврат наверх после сохранения
             } else {
                 alert('Не удалось сохранить изменения.');
             }
@@ -266,8 +311,8 @@
         document.getElementById('cancel-btn').style.width = '100%';
         document.getElementById('cancel-btn').style.display = 'inline-block';
         
-        // Скроллим внутренний враппер наверх вместо window
-        document.querySelector('.scroll-wrapper').scrollTo({ top: 0, behavior: 'smooth' });
+        // Возвращаем стандартный скролл окна
+        window.scrollTo({ top: 0, behavior: 'smooth' });
     }
 
     async function deleteDevice(id) {
