@@ -119,9 +119,9 @@
       "address": 19,
       "type": "holding",
       "bitrate": 16,
-      "unit": "kPa",
+      "unit": "Bar",
       "device_class": "pressure",
-      "scale": 0.01
+      "scale": 0.1
     },
     {
       "name": "Уровень топлива",
