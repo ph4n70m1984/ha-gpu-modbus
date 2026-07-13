@@ -81,7 +81,7 @@
       "bitrate": 16,
       "unit": "A",
       "device_class": "current",
-      "scale": 0.1
+      "scale": 1.0
     },
     {
       "name": "Ток фазы B",
@@ -91,7 +91,7 @@
       "bitrate": 16,
       "unit": "A",
       "device_class": "current",
-      "scale": 0.1
+      "scale": 1.0
     },
     {
       "name": "Ток фазы C",
@@ -101,7 +101,7 @@
       "bitrate": 16,
       "unit": "A",
       "device_class": "current",
-      "scale": 0.1
+      "scale": 1.0
     },
     {
       "name": "Температура охлаждающей жидкости",
