@@ -121,7 +121,7 @@
       "bitrate": 16,
       "unit": "Bar",
       "device_class": "pressure",
-      "scale": 0.0001
+      "scale": 0.1
     },
     {
       "name": "Уровень топлива",
