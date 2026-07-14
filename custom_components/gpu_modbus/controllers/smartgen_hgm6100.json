@@ -121,7 +121,7 @@
       "bitrate": 16,
       "unit": "Bar",
       "device_class": "pressure",
-      "scale": 0.01
+      "scale": 0.1
     },
     {
       "name": "Уровень топлива",
@@ -269,6 +269,42 @@
       "type": "holding",
       "bitrate": 16,
       "unit": "kWh",
+      "scale": 1.0
+    },
+    {
+      "name": "Режим работы: ТЕСТ",
+      "id": "mode_test_active",
+      "address": 40,
+      "type": "coil",
+      "bitrate": 16,
+      "unit": "",
+      "scale": 1.0
+    },
+    {
+      "name": "Режим работы: АВТО",
+      "id": "mode_auto_active",
+      "address": 41,
+      "type": "coil",
+      "bitrate": 16,
+      "unit": "",
+      "scale": 1.0
+    },
+    {
+      "name": "Режим работы: РУЧНОЙ",
+      "id": "mode_manual_active",
+      "address": 42,
+      "type": "coil",
+      "bitrate": 16,
+      "unit": "",
+      "scale": 1.0
+    },
+    {
+      "name": "Режим работы: СТОП",
+      "id": "mode_stop_active",
+      "address": 43,
+      "type": "coil",
+      "bitrate": 16,
+      "unit": "",
       "scale": 1.0
     }
   ],
