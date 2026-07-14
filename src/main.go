@@ -506,7 +506,7 @@ func startDevicePolling(d UserDevice) {
 		lastSuccessfulRead := time.Now()
 		linkDown := true
 
-		ticker := time.NewTicker(5 * time.Second)
+		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 
 		for {
