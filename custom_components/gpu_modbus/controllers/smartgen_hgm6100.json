@@ -198,6 +198,78 @@
       "bitrate": 16,
       "unit": "",
       "scale": 1.0
+    },
+    {
+      "name": "Моточасы (старший байт MSB)",
+      "id": "accum_run_time_msb",
+      "address": 42,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "h",
+      "scale": 1.0
+    },
+    {
+      "name": "Моточасы (младший байт LSB)",
+      "id": "accum_run_time_lsb",
+      "address": 43,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "h",
+      "scale": 1.0
+    },
+    {
+      "name": "Минуты наработки",
+      "id": "accum_run_time_min",
+      "address": 44,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "min",
+      "scale": 1.0
+    },
+    {
+      "name": "Секунды наработки",
+      "id": "accum_run_time_sec",
+      "address": 45,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "s",
+      "scale": 1.0
+    },
+    {
+      "name": "Количество запусков (старший байт MSB)",
+      "id": "accum_start_times_msb",
+      "address": 46,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "",
+      "scale": 1.0
+    },
+    {
+      "name": "Количество запусков (младший байт LSB)",
+      "id": "accum_start_times_lsb",
+      "address": 47,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "",
+      "scale": 1.0
+    },
+    {
+      "name": "Выработанная энергия (старший байт MSB)",
+      "id": "accum_energy_msb",
+      "address": 48,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "kWh",
+      "scale": 1.0
+    },
+    {
+      "name": "Выработанная энергия (младший байт LSB)",
+      "id": "accum_energy_lsb",
+      "address": 49,
+      "type": "holding",
+      "bitrate": 16,
+      "unit": "kWh",
+      "scale": 1.0
     }
   ],
   "commands": [
