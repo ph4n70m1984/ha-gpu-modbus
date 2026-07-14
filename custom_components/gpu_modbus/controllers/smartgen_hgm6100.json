@@ -121,7 +121,7 @@
       "bitrate": 16,
       "unit": "Bar",
       "device_class": "pressure",
-      "scale": 0.1
+      "scale": 0.01
     },
     {
       "name": "Уровень топлива",
@@ -260,7 +260,7 @@
       "type": "holding",
       "bitrate": 16,
       "unit": "kWh",
-      "scale": 1.0
+      "scale": 0.01
     },
     {
       "name": "Выработанная энергия (младший байт LSB)",
