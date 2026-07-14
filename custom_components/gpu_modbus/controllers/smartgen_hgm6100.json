@@ -260,7 +260,7 @@
       "type": "holding",
       "bitrate": 16,
       "unit": "kWh",
-      "scale": 0.01
+      "scale": 100.0
     },
     {
       "name": "Выработанная энергия (младший байт LSB)",
