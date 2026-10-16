@@ -523,7 +523,6 @@ func main() {
 	_ = os.MkdirAll(dataPath, 0755)
 	userDevicesFile = filepath.Join(dataPath, "user_devices.json")
 
-	// Инициализируем реестр аномалий (окно 60 точек, старт от 15 точек, порог 3.0 MAD)
 	anomalyReg = NewAnomalyRegistry(60, 15, 3.0)
 
 	vmWriteURL := os.Getenv("VM_WRITE_URL")
@@ -565,29 +564,34 @@ func loadModels(paths ...string) {
 	mu.Lock()
 	defer mu.Unlock()
 
+	totalLoaded := 0
 	for _, path := range paths {
 		files, err := filepath.Glob(filepath.Join(path, "*.json"))
 		if err != nil {
-			log.Printf("Ошибка сканирования директории %s: %v", path, err)
+			log.Printf("[Models] Ошибка сканирования директории %s: %v", path, err)
 			continue
 		}
 
 		for _, f := range files {
 			data, err := os.ReadFile(f)
 			if err != nil {
-				log.Printf("Ошибка чтения файла %s: %v", f, err)
+				log.Printf("[Models] Ошибка чтения файла %s: %v", f, err)
 				continue
 			}
 
 			var m ControllerModel
 			if err := json.Unmarshal(data, &m); err != nil {
-				log.Printf("Ошибка парсинга JSON в файле %s: %v", f, err)
+				log.Printf("[Models] Ошибка парсинга JSON в файле %s: %v", f, err)
 				continue
 			}
 
 			models[m.ModelID] = m
-			log.Printf("Загружена модель контроллера: %s [%s] из папки: %s", m.Name, m.ModelID, path)
+			totalLoaded++
+			log.Printf("[Models] Загружена модель контроллера: %s [%s] из папки: %s", m.Name, m.ModelID, path)
 		}
+	}
+	if totalLoaded == 0 {
+		log.Printf("[Models] Внимание: не найдено файлов моделей в путях: %v", paths)
 	}
 }
 
@@ -601,14 +605,23 @@ func initMQTT() {
 	opts.SetClientID(fmt.Sprintf("gpu_bridge_%d", time.Now().UnixNano()))
 	opts.SetUsername(os.Getenv("MQTT_USER"))
 	opts.SetPassword(os.Getenv("MQTT_PASSWORD"))
+	opts.SetConnectTimeout(3 * time.Second)
 	opts.SetConnectRetry(true)
 	opts.SetConnectRetryInterval(5 * time.Second)
 
+	opts.OnConnect = func(c mqtt.Client) {
+		log.Println("[MQTT] Успешно установлено соединение с брокером!")
+	}
+	opts.OnConnectionLost = func(c mqtt.Client, err error) {
+		log.Printf("[MQTT] Потеряна связь с брокером: %v. Идет автопереподключение...", err)
+	}
+
 	mqttClient = mqtt.NewClient(opts)
-	if token := mqttClient.Connect(); token.Wait() && token.Error() != nil {
-		log.Printf("MQTT брокер пока недоступен: %v. Подключение продолжится в фоне.", token.Error())
-	} else {
-		log.Println("Успешно установлено соединение с MQTT брокером")
+	log.Printf("[MQTT] Подключение к брокеру: %s ...", broker)
+
+	token := mqttClient.Connect()
+	if token.WaitTimeout(3*time.Second) && token.Error() != nil {
+		log.Printf("[MQTT] Брокер пока недоступен: %v. Подключение продолжится в фоне.", token.Error())
 	}
 }
 
@@ -629,14 +642,11 @@ func loadUserDevices() {
 	}
 	userDevices = devices
 
-	devicesCopy := make([]UserDevice, len(userDevices))
-	copy(devicesCopy, userDevices)
-
-	go func() {
-		for _, d := range devicesCopy {
-			startDevicePolling(d)
-		}
-	}()
+	for _, d := range userDevices {
+		dev := d
+		log.Printf("Запуск независимого воркера для: %s [%s]", dev.Name, dev.ID)
+		go startDevicePolling(dev)
+	}
 }
 
 func safeMqttPublish(topic string, qos byte, retained bool, payload interface{}) {
@@ -713,7 +723,7 @@ func startDevicePolling(d UserDevice) {
 		time.Sleep(1 * time.Second)
 	}
 
-	// 1. MQTT Discovery: базовые регистры и их Anomaly Score сенсоры в HA
+	// 1. MQTT Discovery: базовые регистры и Anomaly Score
 	for _, reg := range model.Registers {
 		discoveryTopic := fmt.Sprintf("homeassistant/sensor/%s/%s/config", d.ID, reg.ID)
 		stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
@@ -744,7 +754,6 @@ func startDevicePolling(d UserDevice) {
 		jsonData, _ := json.Marshal(payload)
 		safeMqttPublish(discoveryTopic, 1, true, jsonData)
 
-		// Авто-регистрация Anomaly Score сенсора
 		anomalyDiscoveryTopic := fmt.Sprintf("homeassistant/sensor/%s/%s_anomaly/config", d.ID, reg.ID)
 		anomalyStateTopic := fmt.Sprintf("gpu/%s/%s/anomaly_score", d.ID, reg.ID)
 
@@ -764,7 +773,7 @@ func startDevicePolling(d UserDevice) {
 		safeMqttPublish(anomalyDiscoveryTopic, 1, true, anomalyJson)
 	}
 
-	// 2. MQTT Discovery: перекос токов и его аномальность
+	// 2. MQTT Discovery: перекос токов
 	imbalanceConfigTopic := fmt.Sprintf("homeassistant/sensor/%s/current_imbalance/config", d.ID)
 	imbalanceStateTopic := fmt.Sprintf("gpu/%s/current_imbalance/state", d.ID)
 
@@ -800,7 +809,7 @@ func startDevicePolling(d UserDevice) {
 	anomJson, _ := json.Marshal(imbalanceAnomPayload)
 	safeMqttPublish(imbalanceAnomalyTopic, 1, true, anomJson)
 
-	// 3. Команды управления (кнопки)
+	// 3. Команды управления
 	cmdChan := make(chan CommandConfig, 5)
 
 	for _, cmd := range model.Commands {
@@ -934,7 +943,6 @@ func startDevicePolling(d UserDevice) {
 
 						safeMqttPublish(stateTopic, 0, false, fmt.Sprintf("%.2f", val))
 
-						// === INGEST В ДЕТЕКТОР АНОМАЛИЙ ===
 						metricKey := fmt.Sprintf("%s:%s", d.ID, reg.ID)
 						anom := anomalyReg.IngestAndEvaluate(metricKey, val)
 
@@ -946,7 +954,6 @@ func startDevicePolling(d UserDevice) {
 									d.Name, reg.Name, val, anom.Median, anom.AnomalyScore)
 							}
 
-							// Опциональный Remote Write в VictoriaMetrics
 							if vmWriter != nil {
 								baseLabels := map[string]string{
 									"device_id": d.ID,
@@ -978,7 +985,6 @@ func startDevicePolling(d UserDevice) {
 						imbalanceTopic := fmt.Sprintf("gpu/%s/current_imbalance/state", d.ID)
 						safeMqttPublish(imbalanceTopic, 0, false, fmt.Sprintf("%.1f", imbalance))
 
-						// Расчет аномальности для перекоса токов
 						imbalanceKey := fmt.Sprintf("%s:current_imbalance", d.ID)
 						imbAnom := anomalyReg.IngestAndEvaluate(imbalanceKey, imbalance)
 
