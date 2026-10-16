@@ -31,8 +31,8 @@ type CommandConfig struct {
 	Name    string `json:"name"`
 	ID      string `json:"id"`
 	Address uint16 `json:"address"`
-	Type    string `json:"type"`  // "register" (Holding Register) или "coil"
-	Value   uint16 `json:"value"` // Значение для записи
+	Type    string `json:"type"`
+	Value   uint16 `json:"value"`
 }
 
 type ControllerModel struct {
@@ -48,7 +48,7 @@ type RegisterConfig struct {
 	ID          string  `json:"id"`
 	Address     uint16  `json:"address"`
 	Type        string  `json:"type"`
-	Bitrate     int     `json:"bitrate"` // 16 или 32 бита
+	Bitrate     int     `json:"bitrate"`
 	Unit        string  `json:"unit"`
 	DeviceClass string  `json:"device_class"`
 	Scale       float64 `json:"scale"`
@@ -185,7 +185,6 @@ func (tb *TrendBuffer) Push(val float64) {
 	now := time.Now()
 	tb.points = append(tb.points, TimedPoint{timestamp: now, value: val})
 
-	// Отсекаем точки старше maxAge
 	cutoff := now.Add(-tb.maxAge)
 	idx := 0
 	for idx < len(tb.points) && tb.points[idx].timestamp.Before(cutoff) {
@@ -196,13 +195,12 @@ func (tb *TrendBuffer) Push(val float64) {
 	}
 }
 
-// CalculateRatePerHour вычисляет скорость изменения (°C/ч) по линейному тренду (метод наименьших квадратов)
 func (tb *TrendBuffer) CalculateRatePerHour() float64 {
 	tb.mu.RLock()
 	defer tb.mu.RUnlock()
 
 	n := len(tb.points)
-	if n < 30 { // Требуется минимум 30 секунд измерений
+	if n < 30 {
 		return 0.0
 	}
 
@@ -224,9 +222,7 @@ func (tb *TrendBuffer) CalculateRatePerHour() float64 {
 		return 0.0
 	}
 
-	// Наклон регрессии: изменение в час
-	slopePerHour := (nf*sumTY - sumT*sumY) / denom
-	return slopePerHour
+	return (nf*sumTY - sumT*sumY) / denom
 }
 
 // ==========================================
@@ -417,17 +413,24 @@ func isProcessMetric(reg RegisterConfig) bool {
 		strings.Contains(id, "vyrabotannaya") ||
 		strings.Contains(id, "zapusk") ||
 		strings.Contains(id, "minuty") ||
+		strings.Contains(id, "sekundy") ||
+		strings.Contains(id, "status") ||
+		strings.Contains(id, "rezhim") ||
 		strings.Contains(id, "lsb") ||
 		strings.Contains(id, "msb") ||
 		strings.Contains(name, "моточасы") ||
 		strings.Contains(name, "энергия") ||
 		strings.Contains(name, "запуск") ||
 		strings.Contains(name, "наработка") ||
+		strings.Contains(name, "секунды") ||
+		strings.Contains(name, "статус") ||
+		strings.Contains(name, "режим") ||
 		strings.Contains(name, "lsb") ||
 		strings.Contains(name, "msb") ||
 		unit == "kwh" ||
 		unit == "min" ||
-		unit == "h" {
+		unit == "h" ||
+		unit == "s" {
 		return false
 	}
 	return true
@@ -828,7 +831,7 @@ func startDevicePolling(d UserDevice) {
 	}
 
 	if d.TimeoutSec <= 0 {
-		d.TimeoutSec = 10
+		d.TimeoutSec = 15
 	}
 
 	for i := 0; i < 5; i++ {
@@ -1030,8 +1033,6 @@ func startDevicePolling(d UserDevice) {
 		}
 	}
 
-	initializeSensorsWithZeros(d, model)
-
 	stopChan := make(chan struct{})
 
 	mu.Lock()
@@ -1041,9 +1042,8 @@ func startDevicePolling(d UserDevice) {
 	activePollers[d.ID] = stopChan
 	mu.Unlock()
 
-	// Локальные буферы предиктивной аналитики
-	rpmBuffer := NewRingBuffer(30)                      // 30 секунд для оценки джиттера регулятора
-	tempTrendBuffer := NewTrendBuffer(15 * time.Minute) // 15 минут для тренда нагрева
+	rpmBuffer := NewRingBuffer(30)
+	tempTrendBuffer := NewTrendBuffer(15 * time.Minute)
 
 	go func() {
 		defer func() {
@@ -1052,263 +1052,204 @@ func startDevicePolling(d UserDevice) {
 			}
 		}()
 
-		communicationTimeout := time.Duration(d.TimeoutSec) * time.Second
-		lastSuccessfulRead := time.Now()
-		linkDown := true
+		connected := false
 
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
+		// Таймаут Modbus клиента ставим 4 секунды (надежно для DEIF/ComAp)
+		client, err := modbus.NewClient(&modbus.ClientConfiguration{
+			URL:     "tcp://" + d.Address,
+			Timeout: 4 * time.Second,
+		})
+		if err != nil {
+			log.Printf("[%s] Ошибка конфигурации Modbus клиента: %v", d.Name, err)
+			return
+		}
+		defer client.Close()
 
 		for {
 			select {
-			case <-ticker.C:
-				if mqttClient == nil || !mqttClient.IsConnected() {
-					continue
+			case <-stopChan:
+				client.Close()
+				for _, cmd := range model.Commands {
+					unsubTopic := fmt.Sprintf("gpu/%s/%s/set", d.ID, cmd.ID)
+					mqttClient.Unsubscribe(unsubTopic)
 				}
+				return
 
-				client, err := modbus.NewClient(&modbus.ClientConfiguration{
-					URL:     "tcp://" + d.Address,
-					Timeout: 2 * time.Second,
-				})
-
-				if err != nil {
-					if !linkDown && time.Since(lastSuccessfulRead) > communicationTimeout {
-						log.Printf("[%s] Ошибка подключения Modbus TCP. Сброс показаний.", d.Name)
-						linkDown = true
-						initializeSensorsWithZeros(d, model)
+			case cmd := <-cmdChan:
+				if connected {
+					var writeErr error
+					if cmd.Type == "coil" {
+						writeErr = client.WriteCoil(cmd.Address, cmd.Value > 0)
+					} else {
+						writeErr = client.WriteRegister(cmd.Address, cmd.Value)
 					}
+
+					if writeErr != nil {
+						log.Printf("[%s] Ошибка выполнения команды '%s': %v", d.Name, cmd.Name, writeErr)
+					} else {
+						log.Printf("[%s] УСПЕХ: Команда '%s' выполнена (Адрес: %d, Записано: %d)", d.Name, cmd.Name, cmd.Address, cmd.Value)
+					}
+				}
+
+			default:
+				if mqttClient == nil || !mqttClient.IsConnected() {
+					time.Sleep(1 * time.Second)
 					continue
 				}
 
-				deviceReadError := false
+				if !connected {
+					if err := client.Open(); err != nil {
+						log.Printf("[%s] Ожидание подключения Modbus TCP (%s): %v", d.Name, d.Address, err)
+						time.Sleep(3 * time.Second)
+						continue
+					}
+					connected = true
+					log.Printf("[%s] Соединение Modbus TCP успешно открыто", d.Name)
+				}
+
 				var currentA, currentB, currentC float64
 				var hasCurrentA, hasCurrentB, hasCurrentC bool
 				var currentRPM, coolantTemp float64
 				var hasRPM, hasCoolantTemp bool
 				nowMs := time.Now().UnixMilli()
 
-				if err := client.Open(); err != nil {
-					deviceReadError = true
-					if linkDown {
-						initializeSensorsWithZeros(d, model)
-					}
-				} else {
-					for _, reg := range model.Registers {
-						var val float64
-						var readErr error
-						regType := modbus.HOLDING_REGISTER
-						if reg.Type == "input" {
-							regType = modbus.INPUT_REGISTER
-						}
-
-						if reg.Bitrate == 32 {
-							var raw32 []uint16
-							raw32, readErr = client.ReadRegisters(reg.Address, 2, regType)
-							if readErr == nil && len(raw32) == 2 {
-								combinedInt := int32(uint32(raw32[0])<<16 | uint32(raw32[1]))
-								val = float64(combinedInt) * reg.Scale
-							} else if readErr == nil {
-								readErr = fmt.Errorf("получено недостаточно регистров")
-							}
-						} else {
-							var raw16 uint16
-							raw16, readErr = client.ReadRegister(reg.Address, regType)
-							if readErr == nil {
-								val = float64(raw16) * reg.Scale
-							}
-						}
-
-						stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
-
-						if readErr != nil {
-							deviceReadError = true
-							if linkDown {
-								safeMqttPublish(stateTopic, 0, false, "0.00")
-								if isProcessMetric(reg) {
-									anomalyTopic := fmt.Sprintf("gpu/%s/%s/anomaly_score", d.ID, reg.ID)
-									safeMqttPublish(anomalyTopic, 0, false, "0.00")
-								}
-							}
-							continue
-						}
-
-						lastSuccessfulRead = time.Now()
-						if linkDown {
-							log.Printf("[%s] Связь с контроллером восстановлена", d.Name)
-							linkDown = false
-						}
-
-						safeMqttPublish(stateTopic, 0, false, fmt.Sprintf("%.2f", val))
-
-						if isProcessMetric(reg) {
-							anomalyTopic := fmt.Sprintf("gpu/%s/%s/anomaly_score", d.ID, reg.ID)
-							metricKey := fmt.Sprintf("%s:%s", d.ID, reg.ID)
-							anom := anomalyReg.IngestAndEvaluate(metricKey, val)
-
-							if anom.IsReady {
-								safeMqttPublish(anomalyTopic, 0, false, fmt.Sprintf("%.2f", anom.AnomalyScore))
-
-								if anom.AnomalyScore >= 1.0 {
-									log.Printf("[%s] АНОМАЛИЯ '%s': значение=%.2f, медиана=%.2f, score=%.2f",
-										d.Name, reg.Name, val, anom.Median, anom.AnomalyScore)
-								}
-
-								if vmWriter != nil {
-									baseLabels := map[string]string{
-										"device_id": d.ID,
-										"generator": d.Name,
-										"register":  reg.ID,
-									}
-									vmWriter.Push(makeTimeSeries(mergeLabels(baseLabels, "__name__", "gpu_"+reg.ID+":anomaly_score"), anom.AnomalyScore, nowMs))
-									vmWriter.Push(makeTimeSeries(mergeLabels(baseLabels, "__name__", "gpu_"+reg.ID+":yhat"), anom.Median, nowMs))
-									vmWriter.Push(makeTimeSeries(mergeLabels(baseLabels, "__name__", "gpu_"+reg.ID+":yhat_upper"), anom.UpperBound, nowMs))
-									vmWriter.Push(makeTimeSeries(mergeLabels(baseLabels, "__name__", "gpu_"+reg.ID+":yhat_lower"), anom.LowerBound, nowMs))
-								}
-							}
-						}
-
-						// Селекция ключевых технологических параметров
-						regIDLower := strings.ToLower(reg.ID)
-						switch {
-						case regIDLower == "current_a" || strings.Contains(regIDLower, "tok_fazy_a"):
-							currentA = val
-							hasCurrentA = true
-						case regIDLower == "current_b" || strings.Contains(regIDLower, "tok_fazy_b"):
-							currentB = val
-							hasCurrentB = true
-						case regIDLower == "current_c" || strings.Contains(regIDLower, "tok_fazy_c"):
-							currentC = val
-							hasCurrentC = true
-						case strings.Contains(regIDLower, "oboroty") || strings.Contains(regIDLower, "rpm") || strings.Contains(regIDLower, "speed"):
-							currentRPM = val
-							hasRPM = true
-						case strings.Contains(regIDLower, "temperatura_okhlazhd") || strings.Contains(regIDLower, "coolant"):
-							coolantTemp = val
-							hasCoolantTemp = true
-						}
+				for _, reg := range model.Registers {
+					var val float64
+					var readErr error
+					regType := modbus.HOLDING_REGISTER
+					if reg.Type == "input" {
+						regType = modbus.INPUT_REGISTER
 					}
 
-					// 1. Расчет перекоса токов
-					if hasCurrentA && hasCurrentB && hasCurrentC {
-						imbalance := calculateCurrentImbalance(currentA, currentB, currentC)
-						imbalanceTopic := fmt.Sprintf("gpu/%s/current_imbalance/state", d.ID)
-						safeMqttPublish(imbalanceTopic, 0, false, fmt.Sprintf("%.1f", imbalance))
-
-						imbalanceKey := fmt.Sprintf("%s:current_imbalance", d.ID)
-						imbAnom := anomalyReg.IngestAndEvaluate(imbalanceKey, imbalance)
-
-						if imbAnom.IsReady {
-							imbalanceAnomTopic := fmt.Sprintf("gpu/%s/current_imbalance/anomaly_score", d.ID)
-							safeMqttPublish(imbalanceAnomTopic, 0, false, fmt.Sprintf("%.2f", imbAnom.AnomalyScore))
+					if reg.Bitrate == 32 {
+						var raw32 []uint16
+						raw32, readErr = client.ReadRegisters(reg.Address, 2, regType)
+						if readErr == nil && len(raw32) == 2 {
+							combinedInt := int32(uint32(raw32[0])<<16 | uint32(raw32[1]))
+							val = float64(combinedInt) * reg.Scale
+						} else if readErr == nil {
+							readErr = fmt.Errorf("недостаточно регистров")
 						}
-
-						if imbalance > 15.0 {
-							log.Printf("[%s] ВНИМАНИЕ: Высокий перекос токов: %.1f%% (A:%.1fA, B:%.1fA, C:%.1fA)",
-								d.Name, imbalance, currentA, currentB, currentC)
-						}
-					}
-
-					// 2. Расчет раскачки регулятора скорости (RPM Jitter)
-					if hasRPM && currentRPM > 100 { // Работает только когда двигатель запущен
-						rpmBuffer.Push(currentRPM)
-						rpmSlice := make([]float64, 30)
-						cnt := rpmBuffer.CopyTo(rpmSlice)
-						if cnt >= 15 {
-							minR, maxR := rpmSlice[0], rpmSlice[0]
-							for i := 1; i < cnt; i++ {
-								if rpmSlice[i] < minR {
-									minR = rpmSlice[i]
-								}
-								if rpmSlice[i] > maxR {
-									maxR = rpmSlice[i]
-								}
-							}
-							rpmJitter := maxR - minR // Пик-пик размах колебаний оборотов
-
-							jitterTopic := fmt.Sprintf("gpu/%s/rpm_jitter/state", d.ID)
-							safeMqttPublish(jitterTopic, 0, false, fmt.Sprintf("%.1f", rpmJitter))
-
-							jitterKey := fmt.Sprintf("%s:rpm_jitter", d.ID)
-							jitterAnom := anomalyReg.IngestAndEvaluate(jitterKey, rpmJitter)
-							if jitterAnom.IsReady {
-								anomTopic := fmt.Sprintf("gpu/%s/rpm_jitter/anomaly_score", d.ID)
-								safeMqttPublish(anomTopic, 0, false, fmt.Sprintf("%.2f", jitterAnom.AnomalyScore))
-							}
-
-							// Порог раскачки оборотов более 10 rpm (признак неустойчивости регулятора)
-							if rpmJitter > 10.0 {
-								log.Printf("[%s] ПРЕДУПРЕЖДЕНИЕ: Раскачка оборотов двигателя (Jitter: %.1f rpm, min: %.0f, max: %.0f)",
-									d.Name, rpmJitter, minR, maxR)
-							}
-						}
-					}
-
-					// 3. Расчет тренда скорости нагрева ОЖ (°C/ч)
-					if hasCoolantTemp && coolantTemp > 40 {
-						tempTrendBuffer.Push(coolantTemp)
-						ratePerHour := tempTrendBuffer.CalculateRatePerHour()
-
-						tempRateTopic := fmt.Sprintf("gpu/%s/coolant_temp_rate/state", d.ID)
-						safeMqttPublish(tempRateTopic, 0, false, fmt.Sprintf("%.1f", ratePerHour))
-
-						rateKey := fmt.Sprintf("%s:coolant_temp_rate", d.ID)
-						rateAnom := anomalyReg.IngestAndEvaluate(rateKey, ratePerHour)
-						if rateAnom.IsReady {
-							anomTopic := fmt.Sprintf("gpu/%s/coolant_temp_rate/anomaly_score", d.ID)
-							safeMqttPublish(anomTopic, 0, false, fmt.Sprintf("%.2f", rateAnom.AnomalyScore))
-						}
-
-						// Если температура ОЖ растет быстрее 8°C в час при температуре выше 85°C — ранний алерт
-						if ratePerHour > 8.0 && coolantTemp >= 85.0 {
-							log.Printf("[%s] ПРЕДУПРЕЖДЕНИЕ: Неконтролируемый рост температуры ОЖ: %.1f°C (тренд +%.1f°C/ч)",
-								d.Name, coolantTemp, ratePerHour)
-						}
-					}
-
-					client.Close()
-				}
-
-				if deviceReadError && !linkDown {
-					if time.Since(lastSuccessfulRead) > communicationTimeout {
-						log.Printf("[%s] Авария связи: нет ответа > %v. Сброс в 0.", d.Name, communicationTimeout)
-						linkDown = true
-						initializeSensorsWithZeros(d, model)
-					}
-				}
-
-			case cmd := <-cmdChan:
-				client, err := modbus.NewClient(&modbus.ClientConfiguration{
-					URL:     "tcp://" + d.Address,
-					Timeout: 2 * time.Second,
-				})
-
-				if err == nil {
-					if err := client.Open(); err == nil {
-						var writeErr error
-
-						if cmd.Type == "coil" {
-							writeErr = client.WriteCoil(cmd.Address, cmd.Value > 0)
-						} else {
-							writeErr = client.WriteRegister(cmd.Address, cmd.Value)
-						}
-
-						if writeErr != nil {
-							log.Printf("[%s] Ошибка выполнения команды '%s': %v", d.Name, cmd.Name, writeErr)
-						} else {
-							log.Printf("[%s] УСПЕХ: Команда '%s' выполнена (Адрес: %d, Записано: %d)", d.Name, cmd.Name, cmd.Address, cmd.Value)
-						}
-						client.Close()
 					} else {
-						log.Printf("[%s] Ошибка сокета при выполнении команды '%s': %v", d.Name, cmd.Name, err)
+						var raw16 uint16
+						raw16, readErr = client.ReadRegister(reg.Address, regType)
+						if readErr == nil {
+							val = float64(raw16) * reg.Scale
+						}
+					}
+
+					if readErr != nil {
+						errStr := readErr.Error()
+						// Разрываем сокет ТОЛЬКО при физическом обрыве канала
+						if strings.Contains(errStr, "broken pipe") ||
+							strings.Contains(errStr, "connection reset") ||
+							strings.Contains(errStr, "EOF") {
+							log.Printf("[%s] Разрыв TCP сокета на регистре %s: %v", d.Name, reg.ID, readErr)
+							client.Close()
+							connected = false
+							break
+						}
+						// Единичный таймаут регистра НЕ ломает опрос — пропускаем и идем дальше
+						continue
+					}
+
+					stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
+					safeMqttPublish(stateTopic, 0, false, fmt.Sprintf("%.2f", val))
+
+					if isProcessMetric(reg) {
+						anomalyTopic := fmt.Sprintf("gpu/%s/%s/anomaly_score", d.ID, reg.ID)
+						metricKey := fmt.Sprintf("%s:%s", d.ID, reg.ID)
+						anom := anomalyReg.IngestAndEvaluate(metricKey, val)
+
+						if anom.IsReady {
+							safeMqttPublish(anomalyTopic, 0, false, fmt.Sprintf("%.2f", anom.AnomalyScore))
+
+							if vmWriter != nil {
+								baseLabels := map[string]string{
+									"device_id": d.ID,
+									"generator": d.Name,
+									"register":  reg.ID,
+								}
+								vmWriter.Push(makeTimeSeries(mergeLabels(baseLabels, "__name__", "gpu_"+reg.ID+":anomaly_score"), anom.AnomalyScore, nowMs))
+								vmWriter.Push(makeTimeSeries(mergeLabels(baseLabels, "__name__", "gpu_"+reg.ID+":yhat"), anom.Median, nowMs))
+								vmWriter.Push(makeTimeSeries(mergeLabels(baseLabels, "__name__", "gpu_"+reg.ID+":yhat_upper"), anom.UpperBound, nowMs))
+								vmWriter.Push(makeTimeSeries(mergeLabels(baseLabels, "__name__", "gpu_"+reg.ID+":yhat_lower"), anom.LowerBound, nowMs))
+							}
+						}
+					}
+
+					regIDLower := strings.ToLower(reg.ID)
+					switch {
+					case regIDLower == "current_a" || strings.Contains(regIDLower, "tok_fazy_a"):
+						currentA = val
+						hasCurrentA = true
+					case regIDLower == "current_b" || strings.Contains(regIDLower, "tok_fazy_b"):
+						currentB = val
+						hasCurrentB = true
+					case regIDLower == "current_c" || strings.Contains(regIDLower, "tok_fazy_c"):
+						currentC = val
+						hasCurrentC = true
+					case strings.Contains(regIDLower, "oboroty") || strings.Contains(regIDLower, "rpm") || strings.Contains(regIDLower, "speed"):
+						currentRPM = val
+						hasRPM = true
+					case strings.Contains(regIDLower, "temperatura_okhlazhd") || strings.Contains(regIDLower, "coolant"):
+						coolantTemp = val
+						hasCoolantTemp = true
 					}
 				}
 
-			case <-stopChan:
-				for _, cmd := range model.Commands {
-					unsubTopic := fmt.Sprintf("gpu/%s/%s/set", d.ID, cmd.ID)
-					mqttClient.Unsubscribe(unsubTopic)
+				// 1. Расчет перекоса токов
+				if hasCurrentA && hasCurrentB && hasCurrentC {
+					imbalance := calculateCurrentImbalance(currentA, currentB, currentC)
+					imbalanceTopic := fmt.Sprintf("gpu/%s/current_imbalance/state", d.ID)
+					safeMqttPublish(imbalanceTopic, 0, false, fmt.Sprintf("%.1f", imbalance))
+
+					imbalanceKey := fmt.Sprintf("%s:current_imbalance", d.ID)
+					imbAnom := anomalyReg.IngestAndEvaluate(imbalanceKey, imbalance)
+					if imbAnom.IsReady {
+						safeMqttPublish(fmt.Sprintf("gpu/%s/current_imbalance/anomaly_score", d.ID), 0, false, fmt.Sprintf("%.2f", imbAnom.AnomalyScore))
+					}
 				}
-				return
+
+				// 2. Расчет раскачки регулятора скорости (RPM Jitter)
+				if hasRPM && currentRPM > 100 {
+					rpmBuffer.Push(currentRPM)
+					rpmSlice := make([]float64, 30)
+					cnt := rpmBuffer.CopyTo(rpmSlice)
+					if cnt >= 10 {
+						minR, maxR := rpmSlice[0], rpmSlice[0]
+						for i := 1; i < cnt; i++ {
+							if rpmSlice[i] < minR {
+								minR = rpmSlice[i]
+							}
+							if rpmSlice[i] > maxR {
+								maxR = rpmSlice[i]
+							}
+						}
+						rpmJitter := maxR - minR
+
+						safeMqttPublish(fmt.Sprintf("gpu/%s/rpm_jitter/state", d.ID), 0, false, fmt.Sprintf("%.1f", rpmJitter))
+						jAnom := anomalyReg.IngestAndEvaluate(fmt.Sprintf("%s:rpm_jitter", d.ID), rpmJitter)
+						if jAnom.IsReady {
+							safeMqttPublish(fmt.Sprintf("gpu/%s/rpm_jitter/anomaly_score", d.ID), 0, false, fmt.Sprintf("%.2f", jAnom.AnomalyScore))
+						}
+					}
+				}
+
+				// 3. Расчет тренда скорости нагрева ОЖ (°C/ч)
+				if hasCoolantTemp && coolantTemp > 40 {
+					tempTrendBuffer.Push(coolantTemp)
+					ratePerHour := tempTrendBuffer.CalculateRatePerHour()
+					safeMqttPublish(fmt.Sprintf("gpu/%s/coolant_temp_rate/state", d.ID), 0, false, fmt.Sprintf("%.1f", ratePerHour))
+
+					rAnom := anomalyReg.IngestAndEvaluate(fmt.Sprintf("%s:coolant_temp_rate", d.ID), ratePerHour)
+					if rAnom.IsReady {
+						safeMqttPublish(fmt.Sprintf("gpu/%s/coolant_temp_rate/anomaly_score", d.ID), 0, false, fmt.Sprintf("%.2f", rAnom.AnomalyScore))
+					}
+				}
+
+				// Пауза 1.5 секунды между полными кругами опроса
+				time.Sleep(1500 * time.Millisecond)
 			}
 		}
 	}()
