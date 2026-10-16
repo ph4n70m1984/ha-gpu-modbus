@@ -307,13 +307,24 @@ func (r *AnomalyRegistry) IngestAndEvaluate(key string, val float64) AnomalyOutp
 
 	window := (*bufPtr)[:n]
 	median, mad := CalculateMedianAndMADFast(window)
-	if mad < 1e-4 {
-		mad = 1e-4
+
+	// Адаптивная нижняя граница разброса, предотвращающая деление на нулевой или микроскопический шум
+	minMad := math.Abs(median) * 0.02
+	if minMad < 0.5 {
+		minMad = 0.5
+	}
+	if mad < minMad {
+		mad = minMad
 	}
 
 	upperBound := median + r.sensitivity*mad
 	lowerBound := math.Max(0, median-r.sensitivity*mad)
 	anomalyScore := math.Abs(val-median) / (r.sensitivity * mad)
+
+	// Ограничиваем сверху, чтобы всплески холодного старта не зашкаливали
+	if anomalyScore > 10.0 {
+		anomalyScore = 10.0
+	}
 
 	return AnomalyOutput{
 		CurrentVal:   val,
@@ -323,6 +334,33 @@ func (r *AnomalyRegistry) IngestAndEvaluate(key string, val float64) AnomalyOutp
 		AnomalyScore: anomalyScore,
 		IsReady:      true,
 	}
+}
+
+// Фильтр: отсекаем счетчики, монотонно растущие значения и сырые байты
+func isProcessMetric(reg RegisterConfig) bool {
+	id := strings.ToLower(reg.ID)
+	name := strings.ToLower(reg.Name)
+	unit := strings.ToLower(reg.Unit)
+
+	if strings.Contains(id, "motochasy") ||
+		strings.Contains(id, "energy") ||
+		strings.Contains(id, "vyrabotannaya") ||
+		strings.Contains(id, "zapusk") ||
+		strings.Contains(id, "minuty") ||
+		strings.Contains(id, "lsb") ||
+		strings.Contains(id, "msb") ||
+		strings.Contains(name, "моточасы") ||
+		strings.Contains(name, "энергия") ||
+		strings.Contains(name, "запуск") ||
+		strings.Contains(name, "наработка") ||
+		strings.Contains(name, "lsb") ||
+		strings.Contains(name, "msb") ||
+		unit == "kwh" ||
+		unit == "min" ||
+		unit == "h" {
+		return false
+	}
+	return true
 }
 
 // ==========================================
@@ -692,8 +730,10 @@ func initializeSensorsWithZeros(d UserDevice, model ControllerModel) {
 		stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
 		safeMqttPublish(stateTopic, 0, false, "0.00")
 
-		anomalyTopic := fmt.Sprintf("gpu/%s/%s/anomaly_score", d.ID, reg.ID)
-		safeMqttPublish(anomalyTopic, 0, false, "0.00")
+		if isProcessMetric(reg) {
+			anomalyTopic := fmt.Sprintf("gpu/%s/%s/anomaly_score", d.ID, reg.ID)
+			safeMqttPublish(anomalyTopic, 0, false, "0.00")
+		}
 	}
 	imbalanceTopic := fmt.Sprintf("gpu/%s/current_imbalance/state", d.ID)
 	safeMqttPublish(imbalanceTopic, 0, false, "0.0")
@@ -723,7 +763,7 @@ func startDevicePolling(d UserDevice) {
 		time.Sleep(1 * time.Second)
 	}
 
-	// 1. MQTT Discovery: базовые регистры и Anomaly Score
+	// 1. MQTT Discovery: базовые регистры и Anomaly Score только для технологических параметров
 	for _, reg := range model.Registers {
 		discoveryTopic := fmt.Sprintf("homeassistant/sensor/%s/%s/config", d.ID, reg.ID)
 		stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
@@ -755,22 +795,27 @@ func startDevicePolling(d UserDevice) {
 		safeMqttPublish(discoveryTopic, 1, true, jsonData)
 
 		anomalyDiscoveryTopic := fmt.Sprintf("homeassistant/sensor/%s/%s_anomaly/config", d.ID, reg.ID)
-		anomalyStateTopic := fmt.Sprintf("gpu/%s/%s/anomaly_score", d.ID, reg.ID)
 
-		anomalyPayload := HADiscoveryPayload{
-			Name:              fmt.Sprintf("%s %s Аномальность", d.Name, reg.Name),
-			StateTopic:        anomalyStateTopic,
-			UnitOfMeasurement: "score",
-			UniqueID:          fmt.Sprintf("%s_%s_anomaly", d.ID, reg.ID),
-			Device: map[string]any{
-				"identifiers":  []string{d.ID},
-				"name":         d.Name,
-				"manufacturer": model.Manufacturer,
-				"model":        model.Name,
-			},
+		if isProcessMetric(reg) {
+			anomalyStateTopic := fmt.Sprintf("gpu/%s/%s/anomaly_score", d.ID, reg.ID)
+			anomalyPayload := HADiscoveryPayload{
+				Name:              fmt.Sprintf("%s %s Аномальность", d.Name, reg.Name),
+				StateTopic:        anomalyStateTopic,
+				UnitOfMeasurement: "score",
+				UniqueID:          fmt.Sprintf("%s_%s_anomaly", d.ID, reg.ID),
+				Device: map[string]any{
+					"identifiers":  []string{d.ID},
+					"name":         d.Name,
+					"manufacturer": model.Manufacturer,
+					"model":        model.Name,
+				},
+			}
+			anomalyJson, _ := json.Marshal(anomalyPayload)
+			safeMqttPublish(anomalyDiscoveryTopic, 1, true, anomalyJson)
+		} else {
+			// Очищаем старые ненужные топики Discovery для счетчиков в брокере
+			safeMqttPublish(anomalyDiscoveryTopic, 1, true, "")
 		}
-		anomalyJson, _ := json.Marshal(anomalyPayload)
-		safeMqttPublish(anomalyDiscoveryTopic, 1, true, anomalyJson)
 	}
 
 	// 2. MQTT Discovery: перекос токов
@@ -924,13 +969,15 @@ func startDevicePolling(d UserDevice) {
 						}
 
 						stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
-						anomalyTopic := fmt.Sprintf("gpu/%s/%s/anomaly_score", d.ID, reg.ID)
 
 						if readErr != nil {
 							deviceReadError = true
 							if linkDown {
 								safeMqttPublish(stateTopic, 0, false, "0.00")
-								safeMqttPublish(anomalyTopic, 0, false, "0.00")
+								if isProcessMetric(reg) {
+									anomalyTopic := fmt.Sprintf("gpu/%s/%s/anomaly_score", d.ID, reg.ID)
+									safeMqttPublish(anomalyTopic, 0, false, "0.00")
+								}
 							}
 							continue
 						}
@@ -943,27 +990,31 @@ func startDevicePolling(d UserDevice) {
 
 						safeMqttPublish(stateTopic, 0, false, fmt.Sprintf("%.2f", val))
 
-						metricKey := fmt.Sprintf("%s:%s", d.ID, reg.ID)
-						anom := anomalyReg.IngestAndEvaluate(metricKey, val)
+						// Оцениваем аномальность только для физических параметров
+						if isProcessMetric(reg) {
+							anomalyTopic := fmt.Sprintf("gpu/%s/%s/anomaly_score", d.ID, reg.ID)
+							metricKey := fmt.Sprintf("%s:%s", d.ID, reg.ID)
+							anom := anomalyReg.IngestAndEvaluate(metricKey, val)
 
-						if anom.IsReady {
-							safeMqttPublish(anomalyTopic, 0, false, fmt.Sprintf("%.2f", anom.AnomalyScore))
+							if anom.IsReady {
+								safeMqttPublish(anomalyTopic, 0, false, fmt.Sprintf("%.2f", anom.AnomalyScore))
 
-							if anom.AnomalyScore >= 1.0 {
-								log.Printf("[%s] АНОМАЛИЯ '%s': значение=%.2f, медиана=%.2f, score=%.2f",
-									d.Name, reg.Name, val, anom.Median, anom.AnomalyScore)
-							}
-
-							if vmWriter != nil {
-								baseLabels := map[string]string{
-									"device_id": d.ID,
-									"generator": d.Name,
-									"register":  reg.ID,
+								if anom.AnomalyScore >= 1.0 {
+									log.Printf("[%s] АНОМАЛИЯ '%s': значение=%.2f, медиана=%.2f, score=%.2f",
+										d.Name, reg.Name, val, anom.Median, anom.AnomalyScore)
 								}
-								vmWriter.Push(makeTimeSeries(mergeLabels(baseLabels, "__name__", "gpu_"+reg.ID+":anomaly_score"), anom.AnomalyScore, nowMs))
-								vmWriter.Push(makeTimeSeries(mergeLabels(baseLabels, "__name__", "gpu_"+reg.ID+":yhat"), anom.Median, nowMs))
-								vmWriter.Push(makeTimeSeries(mergeLabels(baseLabels, "__name__", "gpu_"+reg.ID+":yhat_upper"), anom.UpperBound, nowMs))
-								vmWriter.Push(makeTimeSeries(mergeLabels(baseLabels, "__name__", "gpu_"+reg.ID+":yhat_lower"), anom.LowerBound, nowMs))
+
+								if vmWriter != nil {
+									baseLabels := map[string]string{
+										"device_id": d.ID,
+										"generator": d.Name,
+										"register":  reg.ID,
+									}
+									vmWriter.Push(makeTimeSeries(mergeLabels(baseLabels, "__name__", "gpu_"+reg.ID+":anomaly_score"), anom.AnomalyScore, nowMs))
+									vmWriter.Push(makeTimeSeries(mergeLabels(baseLabels, "__name__", "gpu_"+reg.ID+":yhat"), anom.Median, nowMs))
+									vmWriter.Push(makeTimeSeries(mergeLabels(baseLabels, "__name__", "gpu_"+reg.ID+":yhat_upper"), anom.UpperBound, nowMs))
+									vmWriter.Push(makeTimeSeries(mergeLabels(baseLabels, "__name__", "gpu_"+reg.ID+":yhat_lower"), anom.LowerBound, nowMs))
+								}
 							}
 						}
 
