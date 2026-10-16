@@ -116,8 +116,8 @@ def sync_devices_json(hass: HomeAssistant):
 async def start_bridge_process(hass: HomeAssistant, entry: ConfigEntry):
     """Запускает Go-бинарник моста без HTTP сервера."""
     arch = platform.machine().lower()
-    bin_name = "gpu_bridge_arm64" if ("aarch64" in arch or "arm64" in arch) else "gpu_bridge_amd64"[cite: 1]
-    bin_path = os.path.join(os.path.dirname(__file__), "bin", bin_name)[cite: 1]
+    bin_name = "gpu_bridge_arm64" if ("aarch64" in arch or "arm64" in arch) else "gpu_bridge_amd64"
+    bin_path = os.path.join(os.path.dirname(__file__), "bin", bin_name)
 
     if not os.path.exists(bin_path):
         _LOGGER.error("Бинарный файл моста %s не найден", bin_path)
