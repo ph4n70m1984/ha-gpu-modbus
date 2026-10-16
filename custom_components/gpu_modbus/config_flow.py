@@ -25,10 +25,14 @@ from .const import (
     CONF_ANOMALY_WINDOW,
     CONF_ANOMALY_SENSITIVITY,
     CONF_VM_WRITE_URL,
+    CONF_MQTT_BROKER,
+    CONF_MQTT_USER,
+    CONF_MQTT_PASSWORD,
     DEFAULT_PORT,
     DEFAULT_TIMEOUT_SEC,
     DEFAULT_ANOMALY_WINDOW,
     DEFAULT_ANOMALY_SENSITIVITY,
+    DEFAULT_MQTT_BROKER,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -37,10 +41,7 @@ _LOGGER = logging.getLogger(__name__)
 def get_available_models(hass) -> dict[str, str]:
     """Сканирует встроенные и пользовательские JSON-файлы моделей контроллеров."""
     models: dict[str, str] = {}
-    
-    # 1. Встроенные модели интеграции
     builtin_path = os.path.join(os.path.dirname(__file__), "controllers")
-    # 2. Пользовательские модели в папке конфигурации HA
     custom_path = hass.config.path("gpu_modbus_custom")
 
     for path in (builtin_path, custom_path):
@@ -55,7 +56,7 @@ def get_available_models(hass) -> dict[str, str]:
                     if model_id:
                         models[model_id] = f"{name} ({data.get('manufacturer', 'Generic')})"
             except Exception as err:
-                _LOGGER.warning("Ошибка чтения файла конфигурации контроллера %s: %s", file_path, err)
+                _LOGGER.warning("Ошибка чтения файла %s: %s", file_path, err)
 
     if not models:
         models["generic"] = "Универсальный контроллер (Generic)"
@@ -75,11 +76,10 @@ class GPUModbusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         available_models = await self.hass.async_add_executor_job(get_available_models, self.hass)
 
         if user_input is not None:
-            # Формируем уникальный идентификатор устройства
             host = user_input[CONF_HOST]
             port = user_input[CONF_PORT]
             device_id = f"gpu_{host.replace('.', '_')}_{port}"
-            
+
             await self.async_set_unique_id(device_id)
             self._abort_if_unique_id_configured()
 
@@ -95,6 +95,9 @@ class GPUModbusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_HOST): cv.string,
                 vol.Required(CONF_PORT, default=DEFAULT_PORT): cv.port,
                 vol.Required(CONF_MODEL_ID): vol.In(available_models),
+                vol.Required(CONF_MQTT_BROKER, default=DEFAULT_MQTT_BROKER): cv.string,
+                vol.Optional(CONF_MQTT_USER, default=""): cv.string,
+                vol.Optional(CONF_MQTT_PASSWORD, default=""): cv.string,
                 vol.Optional(CONF_TIMEOUT_SEC, default=DEFAULT_TIMEOUT_SEC): vol.All(
                     vol.Coerce(int), vol.Range(min=2, max=60)
                 ),
@@ -125,7 +128,6 @@ class GPUModbusOptionsFlowHandler(config_entries.OptionsFlow):
     """Меню изменения настроек существующей ГПУ."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        """Инициализация обработчика настроек."""
         self._config_entry = config_entry
 
     async def async_step_init(
@@ -149,6 +151,18 @@ class GPUModbusOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Required(
                     CONF_MODEL_ID, default=current.get(CONF_MODEL_ID)
                 ): vol.In(available_models),
+                vol.Required(
+                    CONF_MQTT_BROKER,
+                    default=current.get(CONF_MQTT_BROKER, DEFAULT_MQTT_BROKER),
+                ): cv.string,
+                vol.Optional(
+                    CONF_MQTT_USER,
+                    default=current.get(CONF_MQTT_USER, ""),
+                ): cv.string,
+                vol.Optional(
+                    CONF_MQTT_PASSWORD,
+                    default=current.get(CONF_MQTT_PASSWORD, ""),
+                ): cv.string,
                 vol.Optional(
                     CONF_TIMEOUT_SEC,
                     default=current.get(CONF_TIMEOUT_SEC, DEFAULT_TIMEOUT_SEC),
