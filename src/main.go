@@ -157,6 +157,79 @@ func (rb *RingBuffer) CopyTo(dst []float64) int {
 }
 
 // ==========================================
+// БУФЕР ДЕТЕКЦИИ ТЕМПЕРАТУРНОГО ДРЕЙФА (15 МИНУТ)
+// ==========================================
+
+type TimedPoint struct {
+	timestamp time.Time
+	value     float64
+}
+
+type TrendBuffer struct {
+	mu     sync.RWMutex
+	points []TimedPoint
+	maxAge time.Duration
+}
+
+func NewTrendBuffer(maxAge time.Duration) *TrendBuffer {
+	return &TrendBuffer{
+		points: make([]TimedPoint, 0, 1000),
+		maxAge: maxAge,
+	}
+}
+
+func (tb *TrendBuffer) Push(val float64) {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+
+	now := time.Now()
+	tb.points = append(tb.points, TimedPoint{timestamp: now, value: val})
+
+	// Отсекаем точки старше maxAge
+	cutoff := now.Add(-tb.maxAge)
+	idx := 0
+	for idx < len(tb.points) && tb.points[idx].timestamp.Before(cutoff) {
+		idx++
+	}
+	if idx > 0 {
+		tb.points = append(tb.points[:0], tb.points[idx:]...)
+	}
+}
+
+// CalculateRatePerHour вычисляет скорость изменения (°C/ч) по линейному тренду (метод наименьших квадратов)
+func (tb *TrendBuffer) CalculateRatePerHour() float64 {
+	tb.mu.RLock()
+	defer tb.mu.RUnlock()
+
+	n := len(tb.points)
+	if n < 30 { // Требуется минимум 30 секунд измерений
+		return 0.0
+	}
+
+	t0 := tb.points[0].timestamp
+	var sumT, sumY, sumTY, sumT2 float64
+
+	for _, p := range tb.points {
+		tHours := p.timestamp.Sub(t0).Hours()
+		y := p.value
+		sumT += tHours
+		sumY += y
+		sumTY += tHours * y
+		sumT2 += tHours * tHours
+	}
+
+	nf := float64(n)
+	denom := nf*sumT2 - sumT*sumT
+	if math.Abs(denom) < 1e-9 {
+		return 0.0
+	}
+
+	// Наклон регрессии: изменение в час
+	slopePerHour := (nf*sumTY - sumT*sumY) / denom
+	return slopePerHour
+}
+
+// ==========================================
 // МАТЕМАТИКА QUICKSELECT И MAD (O(N))
 // ==========================================
 
@@ -308,7 +381,6 @@ func (r *AnomalyRegistry) IngestAndEvaluate(key string, val float64) AnomalyOutp
 	window := (*bufPtr)[:n]
 	median, mad := CalculateMedianAndMADFast(window)
 
-	// Адаптивная нижняя граница разброса, предотвращающая деление на нулевой или микроскопический шум
 	minMad := math.Abs(median) * 0.02
 	if minMad < 0.5 {
 		minMad = 0.5
@@ -321,7 +393,6 @@ func (r *AnomalyRegistry) IngestAndEvaluate(key string, val float64) AnomalyOutp
 	lowerBound := math.Max(0, median-r.sensitivity*mad)
 	anomalyScore := math.Abs(val-median) / (r.sensitivity * mad)
 
-	// Ограничиваем сверху, чтобы всплески холодного старта не зашкаливали
 	if anomalyScore > 10.0 {
 		anomalyScore = 10.0
 	}
@@ -336,7 +407,6 @@ func (r *AnomalyRegistry) IngestAndEvaluate(key string, val float64) AnomalyOutp
 	}
 }
 
-// Фильтр: отсекаем счетчики, монотонно растущие значения и сырые байты
 func isProcessMetric(reg RegisterConfig) bool {
 	id := strings.ToLower(reg.ID)
 	name := strings.ToLower(reg.Name)
@@ -680,7 +750,6 @@ func loadUserDevices() {
 	}
 	userDevices = devices
 
-	// Запуск каждого устройства в полностью независимой горутине
 	for _, d := range userDevices {
 		dev := d
 		log.Printf("Запуск независимого воркера для: %s [%s]", dev.Name, dev.ID)
@@ -741,6 +810,11 @@ func initializeSensorsWithZeros(d UserDevice, model ControllerModel) {
 
 	imbalanceAnomalyTopic := fmt.Sprintf("gpu/%s/current_imbalance/anomaly_score", d.ID)
 	safeMqttPublish(imbalanceAnomalyTopic, 0, false, "0.00")
+
+	safeMqttPublish(fmt.Sprintf("gpu/%s/rpm_jitter/state", d.ID), 0, false, "0.0")
+	safeMqttPublish(fmt.Sprintf("gpu/%s/rpm_jitter/anomaly_score", d.ID), 0, false, "0.00")
+	safeMqttPublish(fmt.Sprintf("gpu/%s/coolant_temp_rate/state", d.ID), 0, false, "0.0")
+	safeMqttPublish(fmt.Sprintf("gpu/%s/coolant_temp_rate/anomaly_score", d.ID), 0, false, "0.00")
 }
 
 func startDevicePolling(d UserDevice) {
@@ -764,7 +838,7 @@ func startDevicePolling(d UserDevice) {
 		time.Sleep(1 * time.Second)
 	}
 
-	// 1. MQTT Discovery: базовые регистры и Anomaly Score только для технологических параметров
+	// 1. MQTT Discovery: базовые регистры и Anomaly Score
 	for _, reg := range model.Registers {
 		discoveryTopic := fmt.Sprintf("homeassistant/sensor/%s/%s/config", d.ID, reg.ID)
 		stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
@@ -814,7 +888,6 @@ func startDevicePolling(d UserDevice) {
 			anomalyJson, _ := json.Marshal(anomalyPayload)
 			safeMqttPublish(anomalyDiscoveryTopic, 1, true, anomalyJson)
 		} else {
-			// Очищаем старые ненужные топики Discovery для счетчиков в брокере
 			safeMqttPublish(anomalyDiscoveryTopic, 1, true, "")
 		}
 	}
@@ -855,7 +928,77 @@ func startDevicePolling(d UserDevice) {
 	anomJson, _ := json.Marshal(imbalanceAnomPayload)
 	safeMqttPublish(imbalanceAnomalyTopic, 1, true, anomJson)
 
-	// 3. Команды управления
+	// 3. MQTT Discovery: Раскачка оборотов (RPM Jitter)
+	rpmJitterConfigTopic := fmt.Sprintf("homeassistant/sensor/%s/rpm_jitter/config", d.ID)
+	rpmJitterStateTopic := fmt.Sprintf("gpu/%s/rpm_jitter/state", d.ID)
+	rpmJitterPayload := HADiscoveryPayload{
+		Name:              fmt.Sprintf("%s Раскачка оборотов", d.Name),
+		StateTopic:        rpmJitterStateTopic,
+		UnitOfMeasurement: "rpm",
+		UniqueID:          fmt.Sprintf("%s_rpm_jitter", d.ID),
+		Device: map[string]any{
+			"identifiers":  []string{d.ID},
+			"name":         d.Name,
+			"manufacturer": model.Manufacturer,
+			"model":        model.Name,
+		},
+	}
+	rjJson, _ := json.Marshal(rpmJitterPayload)
+	safeMqttPublish(rpmJitterConfigTopic, 1, true, rjJson)
+
+	rpmJitterAnomTopic := fmt.Sprintf("homeassistant/sensor/%s/rpm_jitter_anomaly/config", d.ID)
+	rpmJitterAnomState := fmt.Sprintf("gpu/%s/rpm_jitter/anomaly_score", d.ID)
+	rpmJitterAnomPayload := HADiscoveryPayload{
+		Name:              fmt.Sprintf("%s Раскачка оборотов Аномальность", d.Name),
+		StateTopic:        rpmJitterAnomState,
+		UnitOfMeasurement: "score",
+		UniqueID:          fmt.Sprintf("%s_rpm_jitter_anomaly", d.ID),
+		Device: map[string]any{
+			"identifiers":  []string{d.ID},
+			"name":         d.Name,
+			"manufacturer": model.Manufacturer,
+			"model":        model.Name,
+		},
+	}
+	rjaJson, _ := json.Marshal(rpmJitterAnomPayload)
+	safeMqttPublish(rpmJitterAnomTopic, 1, true, rjaJson)
+
+	// 4. MQTT Discovery: Скорость роста температуры ОЖ (dT/dt)
+	tempRateConfigTopic := fmt.Sprintf("homeassistant/sensor/%s/coolant_temp_rate/config", d.ID)
+	tempRateStateTopic := fmt.Sprintf("gpu/%s/coolant_temp_rate/state", d.ID)
+	tempRatePayload := HADiscoveryPayload{
+		Name:              fmt.Sprintf("%s Скорость нагрева ОЖ", d.Name),
+		StateTopic:        tempRateStateTopic,
+		UnitOfMeasurement: "°C/h",
+		UniqueID:          fmt.Sprintf("%s_coolant_temp_rate", d.ID),
+		Device: map[string]any{
+			"identifiers":  []string{d.ID},
+			"name":         d.Name,
+			"manufacturer": model.Manufacturer,
+			"model":        model.Name,
+		},
+	}
+	trJson, _ := json.Marshal(tempRatePayload)
+	safeMqttPublish(tempRateConfigTopic, 1, true, trJson)
+
+	tempRateAnomTopic := fmt.Sprintf("homeassistant/sensor/%s/coolant_temp_rate_anomaly/config", d.ID)
+	tempRateAnomState := fmt.Sprintf("gpu/%s/coolant_temp_rate/anomaly_score", d.ID)
+	tempRateAnomPayload := HADiscoveryPayload{
+		Name:              fmt.Sprintf("%s Скорость нагрева ОЖ Аномальность", d.Name),
+		StateTopic:        tempRateAnomState,
+		UnitOfMeasurement: "score",
+		UniqueID:          fmt.Sprintf("%s_coolant_temp_rate_anomaly", d.ID),
+		Device: map[string]any{
+			"identifiers":  []string{d.ID},
+			"name":         d.Name,
+			"manufacturer": model.Manufacturer,
+			"model":        model.Name,
+		},
+	}
+	traJson, _ := json.Marshal(tempRateAnomPayload)
+	safeMqttPublish(tempRateAnomTopic, 1, true, traJson)
+
+	// 5. Команды управления
 	cmdChan := make(chan CommandConfig, 5)
 
 	for _, cmd := range model.Commands {
@@ -898,6 +1041,10 @@ func startDevicePolling(d UserDevice) {
 	activePollers[d.ID] = stopChan
 	mu.Unlock()
 
+	// Локальные буферы предиктивной аналитики
+	rpmBuffer := NewRingBuffer(30)                      // 30 секунд для оценки джиттера регулятора
+	tempTrendBuffer := NewTrendBuffer(15 * time.Minute) // 15 минут для тренда нагрева
+
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -936,6 +1083,8 @@ func startDevicePolling(d UserDevice) {
 				deviceReadError := false
 				var currentA, currentB, currentC float64
 				var hasCurrentA, hasCurrentB, hasCurrentC bool
+				var currentRPM, coolantTemp float64
+				var hasRPM, hasCoolantTemp bool
 				nowMs := time.Now().UnixMilli()
 
 				if err := client.Open(); err != nil {
@@ -991,7 +1140,6 @@ func startDevicePolling(d UserDevice) {
 
 						safeMqttPublish(stateTopic, 0, false, fmt.Sprintf("%.2f", val))
 
-						// Оцениваем аномальность только для физических параметров
 						if isProcessMetric(reg) {
 							anomalyTopic := fmt.Sprintf("gpu/%s/%s/anomaly_score", d.ID, reg.ID)
 							metricKey := fmt.Sprintf("%s:%s", d.ID, reg.ID)
@@ -1019,19 +1167,28 @@ func startDevicePolling(d UserDevice) {
 							}
 						}
 
-						switch reg.ID {
-						case "current_a":
+						// Селекция ключевых технологических параметров
+						regIDLower := strings.ToLower(reg.ID)
+						switch {
+						case regIDLower == "current_a" || strings.Contains(regIDLower, "tok_fazy_a"):
 							currentA = val
 							hasCurrentA = true
-						case "current_b":
+						case regIDLower == "current_b" || strings.Contains(regIDLower, "tok_fazy_b"):
 							currentB = val
 							hasCurrentB = true
-						case "current_c":
+						case regIDLower == "current_c" || strings.Contains(regIDLower, "tok_fazy_c"):
 							currentC = val
 							hasCurrentC = true
+						case strings.Contains(regIDLower, "oboroty") || strings.Contains(regIDLower, "rpm") || strings.Contains(regIDLower, "speed"):
+							currentRPM = val
+							hasRPM = true
+						case strings.Contains(regIDLower, "temperatura_okhlazhd") || strings.Contains(regIDLower, "coolant"):
+							coolantTemp = val
+							hasCoolantTemp = true
 						}
 					}
 
+					// 1. Расчет перекоса токов
 					if hasCurrentA && hasCurrentB && hasCurrentC {
 						imbalance := calculateCurrentImbalance(currentA, currentB, currentC)
 						imbalanceTopic := fmt.Sprintf("gpu/%s/current_imbalance/state", d.ID)
@@ -1050,6 +1207,64 @@ func startDevicePolling(d UserDevice) {
 								d.Name, imbalance, currentA, currentB, currentC)
 						}
 					}
+
+					// 2. Расчет раскачки регулятора скорости (RPM Jitter)
+					if hasRPM && currentRPM > 100 { // Работает только когда двигатель запущен
+						rpmBuffer.Push(currentRPM)
+						rpmSlice := make([]float64, 30)
+						cnt := rpmBuffer.CopyTo(rpmSlice)
+						if cnt >= 15 {
+							minR, maxR := rpmSlice[0], rpmSlice[0]
+							for i := 1; i < cnt; i++ {
+								if rpmSlice[i] < minR {
+									minR = rpmSlice[i]
+								}
+								if rpmSlice[i] > maxR {
+									maxR = rpmSlice[i]
+								}
+							}
+							rpmJitter := maxR - minR // Пик-пик размах колебаний оборотов
+
+							jitterTopic := fmt.Sprintf("gpu/%s/rpm_jitter/state", d.ID)
+							safeMqttPublish(jitterTopic, 0, false, fmt.Sprintf("%.1f", rpmJitter))
+
+							jitterKey := fmt.Sprintf("%s:rpm_jitter", d.ID)
+							jitterAnom := anomalyReg.IngestAndEvaluate(jitterKey, rpmJitter)
+							if jitterAnom.IsReady {
+								anomTopic := fmt.Sprintf("gpu/%s/rpm_jitter/anomaly_score", d.ID)
+								safeMqttPublish(anomTopic, 0, false, fmt.Sprintf("%.2f", jitterAnom.AnomalyScore))
+							}
+
+							// Порог раскачки оборотов более 10 rpm (признак неустойчивости регулятора)
+							if rpmJitter > 10.0 {
+								log.Printf("[%s] ПРЕДУПРЕЖДЕНИЕ: Раскачка оборотов двигателя (Jitter: %.1f rpm, min: %.0f, max: %.0f)",
+									d.Name, rpmJitter, minR, maxR)
+							}
+						}
+					}
+
+					// 3. Расчет тренда скорости нагрева ОЖ (°C/ч)
+					if hasCoolantTemp && coolantTemp > 40 {
+						tempTrendBuffer.Push(coolantTemp)
+						ratePerHour := tempTrendBuffer.CalculateRatePerHour()
+
+						tempRateTopic := fmt.Sprintf("gpu/%s/coolant_temp_rate/state", d.ID)
+						safeMqttPublish(tempRateTopic, 0, false, fmt.Sprintf("%.1f", ratePerHour))
+
+						rateKey := fmt.Sprintf("%s:coolant_temp_rate", d.ID)
+						rateAnom := anomalyReg.IngestAndEvaluate(rateKey, ratePerHour)
+						if rateAnom.IsReady {
+							anomTopic := fmt.Sprintf("gpu/%s/coolant_temp_rate/anomaly_score", d.ID)
+							safeMqttPublish(anomTopic, 0, false, fmt.Sprintf("%.2f", rateAnom.AnomalyScore))
+						}
+
+						// Если температура ОЖ растет быстрее 8°C в час при температуре выше 85°C — ранний алерт
+						if ratePerHour > 8.0 && coolantTemp >= 85.0 {
+							log.Printf("[%s] ПРЕДУПРЕЖДЕНИЕ: Неконтролируемый рост температуры ОЖ: %.1f°C (тренд +%.1f°C/ч)",
+								d.Name, coolantTemp, ratePerHour)
+						}
+					}
+
 					client.Close()
 				}
 
