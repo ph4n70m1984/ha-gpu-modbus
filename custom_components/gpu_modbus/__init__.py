@@ -53,10 +53,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     os.makedirs(storage_dir, exist_ok=True)
     os.makedirs(custom_controllers_dir, exist_ok=True)
 
+    # 1. Записываем обе ГПУ в user_devices.json
     await hass.async_add_executor_job(sync_devices_json, hass)
 
-    if data["process"] is None:
-        await start_bridge_process(hass, entry)
+    # 2. Перезапускаем Go-мост, чтобы он подхватил новую ГПУ
+    if data["process"] is not None:
+        _LOGGER.info("Перезапуск gpu_bridge для добавления нового устройства...")
+        try:
+            data["process"].terminate()
+            await data["process"].wait()
+        except Exception as e:
+            _LOGGER.warning("Ошибка остановки процесса gpu_bridge: %s", e)
+        data["process"] = None
+
+    await start_bridge_process(hass, entry)
 
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
     return True
