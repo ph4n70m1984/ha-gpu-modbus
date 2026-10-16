@@ -125,7 +125,8 @@ class GPUModbusOptionsFlowHandler(config_entries.OptionsFlow):
     """Меню изменения настроек существующей ГПУ."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = config_entry
+        """Инициализация обработчика настроек."""
+        self._config_entry = config_entry
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -138,7 +139,8 @@ class GPUModbusOptionsFlowHandler(config_entries.OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        current = {**self.config_entry.data, **self.config_entry.options}
+        entry = getattr(self, "config_entry", self._config_entry)
+        current = {**entry.data, **entry.options}
 
         options_schema = vol.Schema(
             {
