@@ -90,27 +90,61 @@ async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
 
 def sync_devices_json(hass: HomeAssistant):
-    """Синхронизирует текущие ConfigEntries в user_devices.json для Go-процесса."""
+    """Синхронизирует ConfigEntries в user_devices.json с поддержкой старых конфигураций."""
     data = hass.data[DOMAIN]
+    storage_dir = hass.config.path(".storage", DOMAIN)
+    json_path = os.path.join(storage_dir, "user_devices.json")
+
+    # Читаем уже существующие устройства, если они были созданы ранее
+    existing_devices: dict[str, dict] = {}
+    legacy_paths = [
+        json_path,
+        hass.config.path("data", "user_devices.json"),
+    ]
+    for p in legacy_paths:
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    for d in json.load(f):
+                        dev_id = d.get("id")
+                        if dev_id:
+                            existing_devices[dev_id] = d
+            except Exception as e:
+                _LOGGER.warning("Ошибка чтения существующего %s: %s", p, e)
+
     device_list = []
 
     for entry in data["entries"].values():
         cfg = {**entry.data, **entry.options}
-        host = cfg[CONF_HOST]
+        
+        # Если запись старая и в ней нет поля 'host', пропускаем падение
+        host = cfg.get(CONF_HOST)
+        if not host:
+            _LOGGER.warning("Запись '%s' не содержит хоста (старый формат), пропускаем", entry.title)
+            continue
+
         port = cfg.get(CONF_PORT, 502)
-        device_list.append({
-            "id": cfg[CONF_DEVICE_ID],
+        dev_id = cfg.get(CONF_DEVICE_ID, f"gpu_{host.replace('.', '_')}_{port}")
+
+        device_entry = {
+            "id": dev_id,
             "name": cfg.get(CONF_DEVICE_NAME, entry.title),
             "address": f"{host}:{port}",
-            "model_id": cfg[CONF_MODEL_ID],
+            "model_id": cfg.get(CONF_MODEL_ID, "generic"),
             "timeout_sec": cfg.get(CONF_TIMEOUT_SEC, DEFAULT_TIMEOUT_SEC),
             "anomaly_window": cfg.get(CONF_ANOMALY_WINDOW, DEFAULT_ANOMALY_WINDOW),
             "anomaly_sensitivity": cfg.get(CONF_ANOMALY_SENSITIVITY, DEFAULT_ANOMALY_SENSITIVITY),
-        })
+        }
+        
+        device_list.append(device_entry)
+        existing_devices[dev_id] = device_entry
 
-    json_path = hass.config.path(".storage", DOMAIN, "user_devices.json")
+    # Если в UI пока нет новых записей с хостом, сохраняем ранее созданные устройства
+    final_list = device_list if device_list else list(existing_devices.values())
+
+    os.makedirs(storage_dir, exist_ok=True)
     with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(device_list, f, indent=2, ensure_ascii=False)
+        json.dump(final_list, f, indent=2, ensure_ascii=False)
 
 
 async def start_bridge_process(hass: HomeAssistant, entry: ConfigEntry):
