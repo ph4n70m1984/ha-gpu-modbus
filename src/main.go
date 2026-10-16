@@ -680,6 +680,7 @@ func loadUserDevices() {
 	}
 	userDevices = devices
 
+	// Запуск каждого устройства в полностью независимой горутине
 	for _, d := range userDevices {
 		dev := d
 		log.Printf("Запуск независимого воркера для: %s [%s]", dev.Name, dev.ID)
