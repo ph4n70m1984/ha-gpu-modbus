@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"math"
 	"net/http"
@@ -49,6 +48,7 @@ type RegisterConfig struct {
 	Address     uint16  `json:"address"`
 	Type        string  `json:"type"`
 	Bitrate     int     `json:"bitrate"`
+	Signed      bool    `json:"signed,omitempty"`
 	Unit        string  `json:"unit"`
 	DeviceClass string  `json:"device_class"`
 	Scale       float64 `json:"scale"`
@@ -79,6 +79,33 @@ type HAButtonDiscovery struct {
 	PayloadPress string         `json:"payload_press"`
 	UniqueID     string         `json:"unique_id"`
 	Device       map[string]any `json:"device"`
+}
+
+type MetricRole uint8
+
+const (
+	RoleNone MetricRole = iota
+	RoleCurrentA
+	RoleCurrentB
+	RoleCurrentC
+	RoleRPM
+	RoleCoolantTemp
+)
+
+type PreparedRegister struct {
+	Config       RegisterConfig
+	IsCoil       bool
+	ModbusType   modbus.RegType
+	IsSigned     bool
+	IsProcess    bool
+	Role         MetricRole
+	StateTopic   string
+	AnomalyTopic string
+	MetricKey    string
+	LabelsScore  []prompb.Label
+	LabelsYhat   []prompb.Label
+	LabelsUpper  []prompb.Label
+	LabelsLower  []prompb.Label
 }
 
 // ==========================================
@@ -131,6 +158,39 @@ func (rb *RingBuffer) Push(val float64) {
 	rb.mu.Unlock()
 }
 
+func (rb *RingBuffer) Reset() {
+	rb.mu.Lock()
+	rb.head = 0
+	rb.isFull = false
+	rb.mu.Unlock()
+}
+
+func (rb *RingBuffer) MinMax() (minVal, maxVal float64, count int) {
+	rb.mu.RLock()
+	defer rb.mu.RUnlock()
+
+	if rb.isFull {
+		count = rb.capacity
+	} else {
+		count = rb.head
+	}
+	if count == 0 {
+		return 0, 0, 0
+	}
+
+	minVal, maxVal = rb.data[0], rb.data[0]
+	for i := 1; i < count; i++ {
+		v := rb.data[i]
+		if v < minVal {
+			minVal = v
+		}
+		if v > maxVal {
+			maxVal = v
+		}
+	}
+	return minVal, maxVal, count
+}
+
 func (rb *RingBuffer) CopyTo(dst []float64) int {
 	rb.mu.RLock()
 	defer rb.mu.RUnlock()
@@ -157,7 +217,7 @@ func (rb *RingBuffer) CopyTo(dst []float64) int {
 }
 
 // ==========================================
-// БУФЕР ДЕТЕКЦИИ ТЕМПЕРАТУРНОГО ДРЕЙФА (15 МИНУТ)
+// БУФЕР ДЕТЕКЦИИ ТЕМПЕРАТУРНОГО ДРЕЙФА
 // ==========================================
 
 type TimedPoint struct {
@@ -178,9 +238,19 @@ func NewTrendBuffer(maxAge time.Duration) *TrendBuffer {
 	}
 }
 
+func (tb *TrendBuffer) Reset() {
+	tb.mu.Lock()
+	tb.points = tb.points[:0]
+	tb.mu.Unlock()
+}
+
 func (tb *TrendBuffer) Push(val float64) {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
+
+	if val <= 0 || val >= 150.0 {
+		return
+	}
 
 	now := time.Now()
 	tb.points = append(tb.points, TimedPoint{timestamp: now, value: val})
@@ -204,6 +274,20 @@ func (tb *TrendBuffer) CalculateRatePerHour() float64 {
 		return 0.0
 	}
 
+	minVal, maxVal := tb.points[0].value, tb.points[0].value
+	for _, p := range tb.points {
+		if p.value < minVal {
+			minVal = p.value
+		}
+		if p.value > maxVal {
+			maxVal = p.value
+		}
+	}
+
+	if (maxVal - minVal) < 0.5 {
+		return 0.0
+	}
+
 	t0 := tb.points[0].timestamp
 	var sumT, sumY, sumTY, sumT2 float64
 
@@ -222,34 +306,45 @@ func (tb *TrendBuffer) CalculateRatePerHour() float64 {
 		return 0.0
 	}
 
-	return (nf*sumTY - sumT*sumY) / denom
+	slope := (nf*sumTY - sumT*sumY) / denom
+
+	if math.Abs(slope) < 0.2 || slope < 0 {
+		return 0.0
+	}
+
+	return slope
 }
 
 // ==========================================
-// МАТЕМАТИКА QUICKSELECT И MAD (O(N))
+// МАТЕМАТИКА QUICKSELECT И MAD
 // ==========================================
 
 func quickselect(a []float64, k int) float64 {
 	left, right := 0, len(a)-1
 	for left < right {
-		pivot := a[right]
-		i := left
-		for j := left; j < right; j++ {
-			if a[j] <= pivot {
-				a[i], a[j] = a[j], a[i]
+		pivot := a[left+(right-left)/2]
+		lt, i, gt := left, left, right
+		for i <= gt {
+			if a[i] < pivot {
+				a[lt], a[i] = a[i], a[lt]
+				lt++
+				i++
+			} else if a[i] > pivot {
+				a[i], a[gt] = a[gt], a[i]
+				gt--
+			} else {
 				i++
 			}
 		}
-		a[i], a[right] = a[right], a[i]
-		if i == k {
-			return a[k]
-		} else if i < k {
-			left = i + 1
+		if k >= lt && k <= gt {
+			return pivot
+		} else if k < lt {
+			right = lt - 1
 		} else {
-			right = i - 1
+			left = gt + 1
 		}
 	}
-	return a[k]
+	return a[left]
 }
 
 func findMedianInplace(a []float64) float64 {
@@ -386,7 +481,7 @@ func (r *AnomalyRegistry) IngestAndEvaluate(key string, val float64) AnomalyOutp
 	}
 
 	upperBound := median + r.sensitivity*mad
-	lowerBound := math.Max(0, median-r.sensitivity*mad)
+	lowerBound := median - r.sensitivity*mad
 	anomalyScore := math.Abs(val-median) / (r.sensitivity * mad)
 
 	if anomalyScore > 10.0 {
@@ -407,8 +502,14 @@ func isProcessMetric(reg RegisterConfig) bool {
 	id := strings.ToLower(reg.ID)
 	name := strings.ToLower(reg.Name)
 	unit := strings.ToLower(reg.Unit)
+	regType := strings.ToLower(reg.Type)
 
-	if strings.Contains(id, "motochasy") ||
+	if regType == "coil" ||
+		strings.Contains(id, "accum_") ||
+		strings.Contains(id, "mode_") ||
+		strings.Contains(id, "running_status") ||
+		strings.Contains(id, "fuel_level") ||
+		strings.Contains(id, "motochasy") ||
 		strings.Contains(id, "energy") ||
 		strings.Contains(id, "vyrabotannaya") ||
 		strings.Contains(id, "zapusk") ||
@@ -425,6 +526,7 @@ func isProcessMetric(reg RegisterConfig) bool {
 		strings.Contains(name, "секунды") ||
 		strings.Contains(name, "статус") ||
 		strings.Contains(name, "режим") ||
+		strings.Contains(name, "топлив") ||
 		strings.Contains(name, "lsb") ||
 		strings.Contains(name, "msb") ||
 		unit == "kwh" ||
@@ -434,6 +536,48 @@ func isProcessMetric(reg RegisterConfig) bool {
 		return false
 	}
 	return true
+}
+
+func isSignedRegister(reg RegisterConfig) bool {
+	if reg.Signed {
+		return true
+	}
+	id := strings.ToLower(reg.ID)
+	devClass := strings.ToLower(reg.DeviceClass)
+	unit := strings.ToLower(reg.Unit)
+
+	if devClass == "power" || devClass == "temperature" ||
+		unit == "kw" || unit == "kvar" || unit == "kva" || unit == "°c" ||
+		strings.Contains(id, "power") || strings.Contains(id, "temp") || strings.Contains(id, "cos") {
+		return true
+	}
+	return false
+}
+
+func detectMetricRole(idLower string) MetricRole {
+	switch {
+	case idLower == "current_a" || strings.Contains(idLower, "tok_fazy_a"):
+		return RoleCurrentA
+	case idLower == "current_b" || strings.Contains(idLower, "tok_fazy_b"):
+		return RoleCurrentB
+	case idLower == "current_c" || strings.Contains(idLower, "tok_fazy_c"):
+		return RoleCurrentC
+	case strings.Contains(idLower, "oboroty") || strings.Contains(idLower, "rpm") || strings.Contains(idLower, "speed"):
+		return RoleRPM
+	case strings.Contains(idLower, "temperatura_okhlazhd") || strings.Contains(idLower, "coolant"):
+		return RoleCoolantTemp
+	default:
+		return RoleNone
+	}
+}
+
+func buildPromLabels(deviceID, genName, regID, metricName string) []prompb.Label {
+	return []prompb.Label{
+		{Name: "__name__", Value: metricName},
+		{Name: "device_id", Value: deviceID},
+		{Name: "generator", Value: genName},
+		{Name: "register", Value: regID},
+	}
 }
 
 // ==========================================
@@ -470,9 +614,13 @@ func NewVMWriter(writeURL string) *VMWriter {
 	return w
 }
 
-func (w *VMWriter) Push(ts prompb.TimeSeries) {
+func (w *VMWriter) PushSeries(labels []prompb.Label, val float64, tsMs int64) {
 	if w == nil {
 		return
+	}
+	ts := prompb.TimeSeries{
+		Labels:  labels,
+		Samples: []prompb.Sample{{Value: val, Timestamp: tsMs}},
 	}
 	select {
 	case w.queueChan <- ts:
@@ -490,7 +638,7 @@ func (w *VMWriter) startFlusher() {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	var batch []prompb.TimeSeries
+	batch := make([]prompb.TimeSeries, 0, w.flushBatch)
 
 	for {
 		select {
@@ -532,7 +680,6 @@ func (w *VMWriter) sendBatch(series []prompb.TimeSeries) {
 
 	n, err := reqData.MarshalTo(*bufPtr)
 	if err != nil {
-		log.Printf("[VMWriter] Ошибка сериализации Protobuf: %v", err)
 		return
 	}
 
@@ -564,37 +711,9 @@ func (w *VMWriter) sendBatch(series []prompb.TimeSeries) {
 
 	resp, err := w.client.Do(req)
 	if err != nil {
-		log.Printf("[VMWriter] Ошибка отправки Remote Write: %v", err)
 		return
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(resp.Body)
-		log.Printf("[VMWriter] VictoriaMetrics вернула статус %d: %s", resp.StatusCode, string(b))
-	}
-}
-
-func makeTimeSeries(labels map[string]string, val float64, tsMs int64) prompb.TimeSeries {
-	pbLabels := make([]prompb.Label, 0, len(labels))
-	for k, v := range labels {
-		pbLabels = append(pbLabels, prompb.Label{Name: k, Value: v})
-	}
-	return prompb.TimeSeries{
-		Labels: pbLabels,
-		Samples: []prompb.Sample{
-			{Value: val, Timestamp: tsMs},
-		},
-	}
-}
-
-func mergeLabels(base map[string]string, k, v string) map[string]string {
-	out := make(map[string]string, len(base)+1)
-	for key, val := range base {
-		out[key] = val
-	}
-	out[k] = v
-	return out
 }
 
 // ==========================================
@@ -605,12 +724,12 @@ var (
 	models          = make(map[string]ControllerModel)
 	userDevices     = []UserDevice{}
 	activePollers   = make(map[string]chan struct{})
+	mqttSubs        = make(map[string]mqtt.MessageHandler)
 	mu              sync.RWMutex
 	mqttClient      mqtt.Client
 	userDevicesFile string
 
-	anomalyReg *AnomalyRegistry
-	vmWriter   *VMWriter
+	vmWriter *VMWriter
 )
 
 func main() {
@@ -634,8 +753,6 @@ func main() {
 	_ = os.MkdirAll(dataPath, 0755)
 	userDevicesFile = filepath.Join(dataPath, "user_devices.json")
 
-	anomalyReg = NewAnomalyRegistry(60, 15, 3.0)
-
 	vmWriteURL := os.Getenv("VM_WRITE_URL")
 	if vmWriteURL != "" {
 		vmWriter = NewVMWriter(vmWriteURL)
@@ -646,7 +763,7 @@ func main() {
 	initMQTT()
 	loadUserDevices()
 
-	log.Println("Go ГПУ Мост успешно запущен в фоновом режиме Home Assistant (HTTP-сервер отключен)")
+	log.Println("Go ГПУ Мост успешно запущен в фоновом режиме Home Assistant")
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -686,13 +803,11 @@ func loadModels(paths ...string) {
 		for _, f := range files {
 			data, err := os.ReadFile(f)
 			if err != nil {
-				log.Printf("[Models] Ошибка чтения файла %s: %v", f, err)
 				continue
 			}
 
 			var m ControllerModel
 			if err := json.Unmarshal(data, &m); err != nil {
-				log.Printf("[Models] Ошибка парсинга JSON в файле %s: %v", f, err)
 				continue
 			}
 
@@ -722,14 +837,17 @@ func initMQTT() {
 
 	opts.OnConnect = func(c mqtt.Client) {
 		log.Println("[MQTT] Успешно установлено соединение с брокером!")
+		mu.RLock()
+		for topic, handler := range mqttSubs {
+			c.Subscribe(topic, 1, handler)
+		}
+		mu.RUnlock()
 	}
 	opts.OnConnectionLost = func(c mqtt.Client, err error) {
 		log.Printf("[MQTT] Потеряна связь с брокером: %v. Идет автопереподключение...", err)
 	}
 
 	mqttClient = mqtt.NewClient(opts)
-	log.Printf("[MQTT] Подключение к брокеру: %s ...", broker)
-
 	token := mqttClient.Connect()
 	if token.WaitTimeout(3*time.Second) && token.Error() != nil {
 		log.Printf("[MQTT] Брокер пока недоступен: %v. Подключение продолжится в фоне.", token.Error())
@@ -742,13 +860,11 @@ func loadUserDevices() {
 
 	data, err := os.ReadFile(userDevicesFile)
 	if err != nil {
-		log.Printf("Файл устройств %s не найден или еще не создан. Ожидание конфигурации из HA.", userDevicesFile)
 		return
 	}
 
 	var devices []UserDevice
 	if err := json.Unmarshal(data, &devices); err != nil {
-		log.Printf("Ошибка парсинга %s: %v", userDevicesFile, err)
 		return
 	}
 	userDevices = devices
@@ -763,7 +879,7 @@ func loadUserDevices() {
 func safeMqttPublish(topic string, qos byte, retained bool, payload interface{}) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("[MQTT] Ошибка публикации в топик %s (паника предотвращена): %v", topic, r)
+			log.Printf("[MQTT] Ошибка публикации: %v", r)
 		}
 	}()
 
@@ -802,22 +918,11 @@ func initializeSensorsWithZeros(d UserDevice, model ControllerModel) {
 	for _, reg := range model.Registers {
 		stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
 		safeMqttPublish(stateTopic, 0, false, "0.00")
-
-		if isProcessMetric(reg) {
-			anomalyTopic := fmt.Sprintf("gpu/%s/%s/anomaly_score", d.ID, reg.ID)
-			safeMqttPublish(anomalyTopic, 0, false, "0.00")
-		}
 	}
 	imbalanceTopic := fmt.Sprintf("gpu/%s/current_imbalance/state", d.ID)
 	safeMqttPublish(imbalanceTopic, 0, false, "0.0")
-
-	imbalanceAnomalyTopic := fmt.Sprintf("gpu/%s/current_imbalance/anomaly_score", d.ID)
-	safeMqttPublish(imbalanceAnomalyTopic, 0, false, "0.00")
-
 	safeMqttPublish(fmt.Sprintf("gpu/%s/rpm_jitter/state", d.ID), 0, false, "0.0")
-	safeMqttPublish(fmt.Sprintf("gpu/%s/rpm_jitter/anomaly_score", d.ID), 0, false, "0.00")
 	safeMqttPublish(fmt.Sprintf("gpu/%s/coolant_temp_rate/state", d.ID), 0, false, "0.0")
-	safeMqttPublish(fmt.Sprintf("gpu/%s/coolant_temp_rate/anomaly_score", d.ID), 0, false, "0.00")
 }
 
 func startDevicePolling(d UserDevice) {
@@ -831,8 +936,10 @@ func startDevicePolling(d UserDevice) {
 	}
 
 	if d.TimeoutSec <= 0 {
-		d.TimeoutSec = 15
+		d.TimeoutSec = 10
 	}
+
+	devAnomalyReg := NewAnomalyRegistry(d.AnomalyWindow, 15, d.AnomalySensitivity)
 
 	for i := 0; i < 5; i++ {
 		if mqttClient != nil && mqttClient.IsConnected() {
@@ -841,10 +948,20 @@ func startDevicePolling(d UserDevice) {
 		time.Sleep(1 * time.Second)
 	}
 
-	// 1. MQTT Discovery: базовые регистры и Anomaly Score
+	deviceInfo := map[string]any{
+		"identifiers":  []string{d.ID},
+		"name":         d.Name,
+		"manufacturer": model.Manufacturer,
+		"model":        model.Name,
+	}
+
+	preparedRegs := make([]PreparedRegister, 0, len(model.Registers))
+
 	for _, reg := range model.Registers {
 		discoveryTopic := fmt.Sprintf("homeassistant/sensor/%s/%s/config", d.ID, reg.ID)
 		stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
+		anomalyStateTopic := fmt.Sprintf("gpu/%s/%s/anomaly_score", d.ID, reg.ID)
+		anomalyDiscoveryTopic := fmt.Sprintf("homeassistant/sensor/%s/%s_anomaly/config", d.ID, reg.ID)
 
 		unit := reg.Unit
 		if reg.DeviceClass == "pressure" {
@@ -862,176 +979,155 @@ func startDevicePolling(d UserDevice) {
 			UnitOfMeasurement: unit,
 			DeviceClass:       reg.DeviceClass,
 			UniqueID:          fmt.Sprintf("%s_%s", d.ID, reg.ID),
-			Device: map[string]any{
-				"identifiers":  []string{d.ID},
-				"name":         d.Name,
-				"manufacturer": model.Manufacturer,
-				"model":        model.Name,
-			},
+			Device:            deviceInfo,
 		}
 		jsonData, _ := json.Marshal(payload)
 		safeMqttPublish(discoveryTopic, 1, true, jsonData)
 
-		anomalyDiscoveryTopic := fmt.Sprintf("homeassistant/sensor/%s/%s_anomaly/config", d.ID, reg.ID)
-
-		if isProcessMetric(reg) {
-			anomalyStateTopic := fmt.Sprintf("gpu/%s/%s/anomaly_score", d.ID, reg.ID)
+		isProc := isProcessMetric(reg)
+		if isProc {
 			anomalyPayload := HADiscoveryPayload{
 				Name:              fmt.Sprintf("%s %s Аномальность", d.Name, reg.Name),
 				StateTopic:        anomalyStateTopic,
 				UnitOfMeasurement: "score",
 				UniqueID:          fmt.Sprintf("%s_%s_anomaly", d.ID, reg.ID),
-				Device: map[string]any{
-					"identifiers":  []string{d.ID},
-					"name":         d.Name,
-					"manufacturer": model.Manufacturer,
-					"model":        model.Name,
-				},
+				Device:            deviceInfo,
 			}
 			anomalyJson, _ := json.Marshal(anomalyPayload)
 			safeMqttPublish(anomalyDiscoveryTopic, 1, true, anomalyJson)
 		} else {
 			safeMqttPublish(anomalyDiscoveryTopic, 1, true, "")
 		}
+
+		regTypeLower := strings.ToLower(reg.Type)
+		mbType := modbus.HOLDING_REGISTER
+		if regTypeLower == "input" {
+			mbType = modbus.INPUT_REGISTER
+		}
+
+		prep := PreparedRegister{
+			Config:       reg,
+			IsCoil:       regTypeLower == "coil",
+			ModbusType:   mbType,
+			IsSigned:     isSignedRegister(reg),
+			IsProcess:    isProc,
+			Role:         detectMetricRole(strings.ToLower(reg.ID)),
+			StateTopic:   stateTopic,
+			AnomalyTopic: anomalyStateTopic,
+			MetricKey:    fmt.Sprintf("%s:%s", d.ID, reg.ID),
+		}
+
+		if isProc && vmWriter != nil {
+			prep.LabelsScore = buildPromLabels(d.ID, d.Name, reg.ID, "gpu_"+reg.ID+":anomaly_score")
+			prep.LabelsYhat = buildPromLabels(d.ID, d.Name, reg.ID, "gpu_"+reg.ID+":yhat")
+			prep.LabelsUpper = buildPromLabels(d.ID, d.Name, reg.ID, "gpu_"+reg.ID+":yhat_upper")
+			prep.LabelsLower = buildPromLabels(d.ID, d.Name, reg.ID, "gpu_"+reg.ID+":yhat_lower")
+		}
+
+		preparedRegs = append(preparedRegs, prep)
 	}
 
-	// 2. MQTT Discovery: перекос токов
-	imbalanceConfigTopic := fmt.Sprintf("homeassistant/sensor/%s/current_imbalance/config", d.ID)
 	imbalanceStateTopic := fmt.Sprintf("gpu/%s/current_imbalance/state", d.ID)
+	imbalanceAnomState := fmt.Sprintf("gpu/%s/current_imbalance/anomaly_score", d.ID)
+	imbalanceKey := fmt.Sprintf("%s:current_imbalance", d.ID)
 
-	imbalancePayload := HADiscoveryPayload{
+	rpmJitterStateTopic := fmt.Sprintf("gpu/%s/rpm_jitter/state", d.ID)
+	rpmJitterAnomState := fmt.Sprintf("gpu/%s/rpm_jitter/anomaly_score", d.ID)
+	rpmJitterKey := fmt.Sprintf("%s:rpm_jitter", d.ID)
+
+	tempRateStateTopic := fmt.Sprintf("gpu/%s/coolant_temp_rate/state", d.ID)
+	tempRateAnomState := fmt.Sprintf("gpu/%s/coolant_temp_rate/anomaly_score", d.ID)
+	tempRateKey := fmt.Sprintf("%s:coolant_temp_rate", d.ID)
+
+	imbalanceJson, _ := json.Marshal(HADiscoveryPayload{
 		Name:              fmt.Sprintf("%s Перекос тока", d.Name),
 		StateTopic:        imbalanceStateTopic,
 		UnitOfMeasurement: "%",
 		UniqueID:          fmt.Sprintf("%s_current_imbalance", d.ID),
-		Device: map[string]any{
-			"identifiers":  []string{d.ID},
-			"name":         d.Name,
-			"manufacturer": model.Manufacturer,
-			"model":        model.Name,
-		},
-	}
-	imbalanceJson, _ := json.Marshal(imbalancePayload)
-	safeMqttPublish(imbalanceConfigTopic, 1, true, imbalanceJson)
+		Device:            deviceInfo,
+	})
+	safeMqttPublish(fmt.Sprintf("homeassistant/sensor/%s/current_imbalance/config", d.ID), 1, true, imbalanceJson)
 
-	imbalanceAnomalyTopic := fmt.Sprintf("homeassistant/sensor/%s/current_imbalance_anomaly/config", d.ID)
-	imbalanceAnomalyState := fmt.Sprintf("gpu/%s/current_imbalance/anomaly_score", d.ID)
-	imbalanceAnomPayload := HADiscoveryPayload{
+	anomJson, _ := json.Marshal(HADiscoveryPayload{
 		Name:              fmt.Sprintf("%s Перекос тока Аномальность", d.Name),
-		StateTopic:        imbalanceAnomalyState,
+		StateTopic:        imbalanceAnomState,
 		UnitOfMeasurement: "score",
 		UniqueID:          fmt.Sprintf("%s_current_imbalance_anomaly", d.ID),
-		Device: map[string]any{
-			"identifiers":  []string{d.ID},
-			"name":         d.Name,
-			"manufacturer": model.Manufacturer,
-			"model":        model.Name,
-		},
-	}
-	anomJson, _ := json.Marshal(imbalanceAnomPayload)
-	safeMqttPublish(imbalanceAnomalyTopic, 1, true, anomJson)
+		Device:            deviceInfo,
+	})
+	safeMqttPublish(fmt.Sprintf("homeassistant/sensor/%s/current_imbalance_anomaly/config", d.ID), 1, true, anomJson)
 
-	// 3. MQTT Discovery: Раскачка оборотов (RPM Jitter)
-	rpmJitterConfigTopic := fmt.Sprintf("homeassistant/sensor/%s/rpm_jitter/config", d.ID)
-	rpmJitterStateTopic := fmt.Sprintf("gpu/%s/rpm_jitter/state", d.ID)
-	rpmJitterPayload := HADiscoveryPayload{
+	rjJson, _ := json.Marshal(HADiscoveryPayload{
 		Name:              fmt.Sprintf("%s Раскачка оборотов", d.Name),
 		StateTopic:        rpmJitterStateTopic,
 		UnitOfMeasurement: "rpm",
 		UniqueID:          fmt.Sprintf("%s_rpm_jitter", d.ID),
-		Device: map[string]any{
-			"identifiers":  []string{d.ID},
-			"name":         d.Name,
-			"manufacturer": model.Manufacturer,
-			"model":        model.Name,
-		},
-	}
-	rjJson, _ := json.Marshal(rpmJitterPayload)
-	safeMqttPublish(rpmJitterConfigTopic, 1, true, rjJson)
+		Device:            deviceInfo,
+	})
+	safeMqttPublish(fmt.Sprintf("homeassistant/sensor/%s/rpm_jitter/config", d.ID), 1, true, rjJson)
 
-	rpmJitterAnomTopic := fmt.Sprintf("homeassistant/sensor/%s/rpm_jitter_anomaly/config", d.ID)
-	rpmJitterAnomState := fmt.Sprintf("gpu/%s/rpm_jitter/anomaly_score", d.ID)
-	rpmJitterAnomPayload := HADiscoveryPayload{
+	rjaJson, _ := json.Marshal(HADiscoveryPayload{
 		Name:              fmt.Sprintf("%s Раскачка оборотов Аномальность", d.Name),
 		StateTopic:        rpmJitterAnomState,
 		UnitOfMeasurement: "score",
 		UniqueID:          fmt.Sprintf("%s_rpm_jitter_anomaly", d.ID),
-		Device: map[string]any{
-			"identifiers":  []string{d.ID},
-			"name":         d.Name,
-			"manufacturer": model.Manufacturer,
-			"model":        model.Name,
-		},
-	}
-	rjaJson, _ := json.Marshal(rpmJitterAnomPayload)
-	safeMqttPublish(rpmJitterAnomTopic, 1, true, rjaJson)
+		Device:            deviceInfo,
+	})
+	safeMqttPublish(fmt.Sprintf("homeassistant/sensor/%s/rpm_jitter_anomaly/config", d.ID), 1, true, rjaJson)
 
-	// 4. MQTT Discovery: Скорость роста температуры ОЖ (dT/dt)
-	tempRateConfigTopic := fmt.Sprintf("homeassistant/sensor/%s/coolant_temp_rate/config", d.ID)
-	tempRateStateTopic := fmt.Sprintf("gpu/%s/coolant_temp_rate/state", d.ID)
-	tempRatePayload := HADiscoveryPayload{
+	trJson, _ := json.Marshal(HADiscoveryPayload{
 		Name:              fmt.Sprintf("%s Скорость нагрева ОЖ", d.Name),
 		StateTopic:        tempRateStateTopic,
 		UnitOfMeasurement: "°C/h",
 		UniqueID:          fmt.Sprintf("%s_coolant_temp_rate", d.ID),
-		Device: map[string]any{
-			"identifiers":  []string{d.ID},
-			"name":         d.Name,
-			"manufacturer": model.Manufacturer,
-			"model":        model.Name,
-		},
-	}
-	trJson, _ := json.Marshal(tempRatePayload)
-	safeMqttPublish(tempRateConfigTopic, 1, true, trJson)
+		Device:            deviceInfo,
+	})
+	safeMqttPublish(fmt.Sprintf("homeassistant/sensor/%s/coolant_temp_rate/config", d.ID), 1, true, trJson)
 
-	tempRateAnomTopic := fmt.Sprintf("homeassistant/sensor/%s/coolant_temp_rate_anomaly/config", d.ID)
-	tempRateAnomState := fmt.Sprintf("gpu/%s/coolant_temp_rate/anomaly_score", d.ID)
-	tempRateAnomPayload := HADiscoveryPayload{
+	traJson, _ := json.Marshal(HADiscoveryPayload{
 		Name:              fmt.Sprintf("%s Скорость нагрева ОЖ Аномальность", d.Name),
 		StateTopic:        tempRateAnomState,
 		UnitOfMeasurement: "score",
 		UniqueID:          fmt.Sprintf("%s_coolant_temp_rate_anomaly", d.ID),
-		Device: map[string]any{
-			"identifiers":  []string{d.ID},
-			"name":         d.Name,
-			"manufacturer": model.Manufacturer,
-			"model":        model.Name,
-		},
-	}
-	traJson, _ := json.Marshal(tempRateAnomPayload)
-	safeMqttPublish(tempRateAnomTopic, 1, true, traJson)
+		Device:            deviceInfo,
+	})
+	safeMqttPublish(fmt.Sprintf("homeassistant/sensor/%s/coolant_temp_rate_anomaly/config", d.ID), 1, true, traJson)
 
-	// 5. Команды управления
-	cmdChan := make(chan CommandConfig, 5)
+	cmdChan := make(chan CommandConfig, 10)
 
 	for _, cmd := range model.Commands {
 		discoveryTopic := fmt.Sprintf("homeassistant/button/%s/%s/config", d.ID, cmd.ID)
 		commandTopic := fmt.Sprintf("gpu/%s/%s/set", d.ID, cmd.ID)
 
-		btnPayload := HAButtonDiscovery{
+		btnJson, _ := json.Marshal(HAButtonDiscovery{
 			Name:         fmt.Sprintf("%s %s", d.Name, cmd.Name),
 			CommandTopic: commandTopic,
 			PayloadPress: "PRESS",
 			UniqueID:     fmt.Sprintf("%s_%s", d.ID, cmd.ID),
-			Device: map[string]any{
-				"identifiers":  []string{d.ID},
-				"name":         d.Name,
-				"manufacturer": model.Manufacturer,
-				"model":        model.Name,
-			},
-		}
-		btnJson, _ := json.Marshal(btnPayload)
+			Device:       deviceInfo,
+		})
 		safeMqttPublish(discoveryTopic, 1, true, btnJson)
 
 		capturedCmd := cmd
-		if mqttClient != nil && mqttClient.IsConnected() {
-			mqttClient.Subscribe(commandTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
-				if string(msg.Payload()) == "PRESS" {
-					cmdChan <- capturedCmd
+		handler := func(client mqtt.Client, msg mqtt.Message) {
+			if string(msg.Payload()) == "PRESS" {
+				select {
+				case cmdChan <- capturedCmd:
+				default:
 				}
-			})
+			}
+		}
+
+		mu.Lock()
+		mqttSubs[commandTopic] = handler
+		mu.Unlock()
+
+		if mqttClient != nil && mqttClient.IsConnected() {
+			mqttClient.Subscribe(commandTopic, 1, handler)
 		}
 	}
+
+	initializeSensorsWithZeros(d, model)
 
 	stopChan := make(chan struct{})
 
@@ -1048,208 +1144,249 @@ func startDevicePolling(d UserDevice) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("[%s] Фоновый воркер опроса аварийно остановлен (panic): %v", d.Name, r)
+				log.Printf("[%s] Фоновый воркер остановлен (паника предотвращена): %v", d.Name, r)
 			}
 		}()
 
-		connected := false
+		communicationTimeout := time.Duration(d.TimeoutSec) * time.Second
+		lastSuccessfulRead := time.Now()
+		linkDown := true
 
-		// Таймаут Modbus клиента ставим 4 секунды (надежно для DEIF/ComAp)
-		client, err := modbus.NewClient(&modbus.ClientConfiguration{
-			URL:     "tcp://" + d.Address,
-			Timeout: 4 * time.Second,
-		})
-		if err != nil {
-			log.Printf("[%s] Ошибка конфигурации Modbus клиента: %v", d.Name, err)
-			return
-		}
-		defer client.Close()
+		ticker := time.NewTicker(2500 * time.Millisecond)
+		defer ticker.Stop()
 
 		for {
 			select {
 			case <-stopChan:
-				client.Close()
+				mu.Lock()
 				for _, cmd := range model.Commands {
 					unsubTopic := fmt.Sprintf("gpu/%s/%s/set", d.ID, cmd.ID)
-					mqttClient.Unsubscribe(unsubTopic)
+					delete(mqttSubs, unsubTopic)
+					if mqttClient != nil && mqttClient.IsConnected() {
+						mqttClient.Unsubscribe(unsubTopic)
+					}
 				}
+				mu.Unlock()
 				return
 
+			// Выполнение команд через изолированный однократный сеанс (Open -> Write -> Close)
 			case cmd := <-cmdChan:
-				if connected {
-					var writeErr error
-					if cmd.Type == "coil" {
-						writeErr = client.WriteCoil(cmd.Address, cmd.Value > 0)
+				cmdClient, err := modbus.NewClient(&modbus.ClientConfiguration{
+					URL:     "tcp://" + d.Address,
+					Timeout: 2 * time.Second,
+				})
+				if err == nil {
+					if err := cmdClient.Open(); err == nil {
+						var writeErr error
+						if strings.ToLower(cmd.Type) == "coil" {
+							writeErr = cmdClient.WriteCoil(cmd.Address, cmd.Value > 0)
+						} else {
+							writeErr = cmdClient.WriteRegister(cmd.Address, cmd.Value)
+						}
+						if writeErr != nil {
+							log.Printf("[%s] Ошибка выполнения команды '%s': %v", d.Name, cmd.Name, writeErr)
+						} else {
+							log.Printf("[%s] УСПЕХ: Команда '%s' выполнена (Адрес: %d, Записано: %d)",
+								d.Name, cmd.Name, cmd.Address, cmd.Value)
+						}
+						cmdClient.Close()
 					} else {
-						writeErr = client.WriteRegister(cmd.Address, cmd.Value)
-					}
-
-					if writeErr != nil {
-						log.Printf("[%s] Ошибка выполнения команды '%s': %v", d.Name, cmd.Name, writeErr)
-					} else {
-						log.Printf("[%s] УСПЕХ: Команда '%s' выполнена (Адрес: %d, Записано: %d)", d.Name, cmd.Name, cmd.Address, cmd.Value)
+						log.Printf("[%s] Ошибка подключения для команды '%s': %v", d.Name, cmd.Name, err)
 					}
 				}
 
-			default:
+			// Циклический опрос: Open() -> опрос всех регистров -> Close() в каждом цикле
+			case <-ticker.C:
 				if mqttClient == nil || !mqttClient.IsConnected() {
-					time.Sleep(1 * time.Second)
 					continue
 				}
 
-				if !connected {
-					if err := client.Open(); err != nil {
-						log.Printf("[%s] Ожидание подключения Modbus TCP (%s): %v", d.Name, d.Address, err)
-						time.Sleep(3 * time.Second)
-						continue
+				client, err := modbus.NewClient(&modbus.ClientConfiguration{
+					URL:     "tcp://" + d.Address,
+					Timeout: 2 * time.Second,
+				})
+				if err != nil {
+					if !linkDown && time.Since(lastSuccessfulRead) > communicationTimeout {
+						linkDown = true
+						initializeSensorsWithZeros(d, model)
 					}
-					connected = true
-					log.Printf("[%s] Соединение Modbus TCP успешно открыто", d.Name)
+					continue
 				}
 
+				deviceReadError := false
 				var currentA, currentB, currentC float64
 				var hasCurrentA, hasCurrentB, hasCurrentC bool
 				var currentRPM, coolantTemp float64
 				var hasRPM, hasCoolantTemp bool
 				nowMs := time.Now().UnixMilli()
 
-				for _, reg := range model.Registers {
-					var val float64
-					var readErr error
-					regType := modbus.HOLDING_REGISTER
-					if reg.Type == "input" {
-						regType = modbus.INPUT_REGISTER
+				if err := client.Open(); err != nil {
+					deviceReadError = true
+					if linkDown {
+						initializeSensorsWithZeros(d, model)
 					}
-
-					if reg.Bitrate == 32 {
-						var raw32 []uint16
-						raw32, readErr = client.ReadRegisters(reg.Address, 2, regType)
-						if readErr == nil && len(raw32) == 2 {
-							combinedInt := int32(uint32(raw32[0])<<16 | uint32(raw32[1]))
-							val = float64(combinedInt) * reg.Scale
-						} else if readErr == nil {
-							readErr = fmt.Errorf("недостаточно регистров")
-						}
-					} else {
-						var raw16 uint16
-						raw16, readErr = client.ReadRegister(reg.Address, regType)
-						if readErr == nil {
-							val = float64(raw16) * reg.Scale
-						}
-					}
-
-					if readErr != nil {
-						errStr := readErr.Error()
-						// Разрываем сокет ТОЛЬКО при физическом обрыве канала
-						if strings.Contains(errStr, "broken pipe") ||
-							strings.Contains(errStr, "connection reset") ||
-							strings.Contains(errStr, "EOF") {
-							log.Printf("[%s] Разрыв TCP сокета на регистре %s: %v", d.Name, reg.ID, readErr)
+				} else {
+					for i := range preparedRegs {
+						// Проверка выхода из горутины между регистрами
+						select {
+						case <-stopChan:
 							client.Close()
-							connected = false
-							break
+							return
+						default:
 						}
-						// Единичный таймаут регистра НЕ ломает опрос — пропускаем и идем дальше
-						continue
-					}
 
-					stateTopic := fmt.Sprintf("gpu/%s/%s/state", d.ID, reg.ID)
-					safeMqttPublish(stateTopic, 0, false, fmt.Sprintf("%.2f", val))
+						prep := &preparedRegs[i]
+						reg := prep.Config
+						var val float64
+						var readErr error
 
-					if isProcessMetric(reg) {
-						anomalyTopic := fmt.Sprintf("gpu/%s/%s/anomaly_score", d.ID, reg.ID)
-						metricKey := fmt.Sprintf("%s:%s", d.ID, reg.ID)
-						anom := anomalyReg.IngestAndEvaluate(metricKey, val)
-
-						if anom.IsReady {
-							safeMqttPublish(anomalyTopic, 0, false, fmt.Sprintf("%.2f", anom.AnomalyScore))
-
-							if vmWriter != nil {
-								baseLabels := map[string]string{
-									"device_id": d.ID,
-									"generator": d.Name,
-									"register":  reg.ID,
+						if prep.IsCoil {
+							var coilVal bool
+							coilVal, readErr = client.ReadCoil(reg.Address)
+							if readErr == nil {
+								if coilVal {
+									val = 1.0
+								} else {
+									val = 0.0
 								}
-								vmWriter.Push(makeTimeSeries(mergeLabels(baseLabels, "__name__", "gpu_"+reg.ID+":anomaly_score"), anom.AnomalyScore, nowMs))
-								vmWriter.Push(makeTimeSeries(mergeLabels(baseLabels, "__name__", "gpu_"+reg.ID+":yhat"), anom.Median, nowMs))
-								vmWriter.Push(makeTimeSeries(mergeLabels(baseLabels, "__name__", "gpu_"+reg.ID+":yhat_upper"), anom.UpperBound, nowMs))
-								vmWriter.Push(makeTimeSeries(mergeLabels(baseLabels, "__name__", "gpu_"+reg.ID+":yhat_lower"), anom.LowerBound, nowMs))
 							}
+						} else if reg.Bitrate == 32 {
+							var raw32 []uint16
+							raw32, readErr = client.ReadRegisters(reg.Address, 2, prep.ModbusType)
+							if readErr == nil && len(raw32) == 2 {
+								combinedInt := int32(uint32(raw32[0])<<16 | uint32(raw32[1]))
+								val = float64(combinedInt) * reg.Scale
+							} else if readErr == nil {
+								readErr = fmt.Errorf("недостаточно регистров")
+							}
+						} else {
+							var raw16 uint16
+							raw16, readErr = client.ReadRegister(reg.Address, prep.ModbusType)
+							if readErr == nil {
+								// Фильтр служебных кодов отсутствия данных SmartGen
+								if raw16 == 32766 || raw16 == 32767 {
+									time.Sleep(20 * time.Millisecond)
+									continue
+								}
+								if prep.IsSigned {
+									val = float64(int16(raw16)) * reg.Scale
+								} else {
+									val = float64(raw16) * reg.Scale
+								}
+							}
+						}
+
+						// При любой ошибке чтения отбрасываем пакет и НЕ публикуем мусор
+						if readErr != nil {
+							deviceReadError = true
+							time.Sleep(20 * time.Millisecond)
+							continue
+						}
+
+						lastSuccessfulRead = time.Now()
+						if linkDown {
+							log.Printf("[%s] Связь с ГПУ восстановлена!", d.Name)
+							linkDown = false
+						}
+
+						safeMqttPublish(prep.StateTopic, 0, false, fmt.Sprintf("%.2f", val))
+
+						if prep.IsProcess {
+							anom := devAnomalyReg.IngestAndEvaluate(prep.MetricKey, val)
+							if anom.IsReady {
+								safeMqttPublish(prep.AnomalyTopic, 0, false, fmt.Sprintf("%.2f", anom.AnomalyScore))
+
+								if vmWriter != nil {
+									vmWriter.PushSeries(prep.LabelsScore, anom.AnomalyScore, nowMs)
+									vmWriter.PushSeries(prep.LabelsYhat, anom.Median, nowMs)
+									vmWriter.PushSeries(prep.LabelsUpper, anom.UpperBound, nowMs)
+									vmWriter.PushSeries(prep.LabelsLower, anom.LowerBound, nowMs)
+								}
+							}
+						}
+
+						switch prep.Role {
+						case RoleCurrentA:
+							currentA = val
+							hasCurrentA = true
+						case RoleCurrentB:
+							currentB = val
+							hasCurrentB = true
+						case RoleCurrentC:
+							currentC = val
+							hasCurrentC = true
+						case RoleRPM:
+							currentRPM = val
+							hasRPM = true
+						case RoleCoolantTemp:
+							coolantTemp = val
+							hasCoolantTemp = true
+						}
+
+						time.Sleep(20 * time.Millisecond)
+					}
+
+					// Сброс и закрытие TCP сокета после каждого круга опроса
+					client.Close()
+
+					// 1. Расчет перекоса токов
+					if hasCurrentA && hasCurrentB && hasCurrentC {
+						imbalance := calculateCurrentImbalance(currentA, currentB, currentC)
+						safeMqttPublish(imbalanceStateTopic, 0, false, fmt.Sprintf("%.1f", imbalance))
+
+						imbAnom := devAnomalyReg.IngestAndEvaluate(imbalanceKey, imbalance)
+						if imbAnom.IsReady {
+							safeMqttPublish(imbalanceAnomState, 0, false, fmt.Sprintf("%.2f", imbAnom.AnomalyScore))
 						}
 					}
 
-					regIDLower := strings.ToLower(reg.ID)
-					switch {
-					case regIDLower == "current_a" || strings.Contains(regIDLower, "tok_fazy_a"):
-						currentA = val
-						hasCurrentA = true
-					case regIDLower == "current_b" || strings.Contains(regIDLower, "tok_fazy_b"):
-						currentB = val
-						hasCurrentB = true
-					case regIDLower == "current_c" || strings.Contains(regIDLower, "tok_fazy_c"):
-						currentC = val
-						hasCurrentC = true
-					case strings.Contains(regIDLower, "oboroty") || strings.Contains(regIDLower, "rpm") || strings.Contains(regIDLower, "speed"):
-						currentRPM = val
-						hasRPM = true
-					case strings.Contains(regIDLower, "temperatura_okhlazhd") || strings.Contains(regIDLower, "coolant"):
-						coolantTemp = val
-						hasCoolantTemp = true
-					}
-				}
-
-				// 1. Расчет перекоса токов
-				if hasCurrentA && hasCurrentB && hasCurrentC {
-					imbalance := calculateCurrentImbalance(currentA, currentB, currentC)
-					imbalanceTopic := fmt.Sprintf("gpu/%s/current_imbalance/state", d.ID)
-					safeMqttPublish(imbalanceTopic, 0, false, fmt.Sprintf("%.1f", imbalance))
-
-					imbalanceKey := fmt.Sprintf("%s:current_imbalance", d.ID)
-					imbAnom := anomalyReg.IngestAndEvaluate(imbalanceKey, imbalance)
-					if imbAnom.IsReady {
-						safeMqttPublish(fmt.Sprintf("gpu/%s/current_imbalance/anomaly_score", d.ID), 0, false, fmt.Sprintf("%.2f", imbAnom.AnomalyScore))
-					}
-				}
-
-				// 2. Расчет раскачки регулятора скорости (RPM Jitter)
-				if hasRPM && currentRPM > 100 {
-					rpmBuffer.Push(currentRPM)
-					rpmSlice := make([]float64, 30)
-					cnt := rpmBuffer.CopyTo(rpmSlice)
-					if cnt >= 10 {
-						minR, maxR := rpmSlice[0], rpmSlice[0]
-						for i := 1; i < cnt; i++ {
-							if rpmSlice[i] < minR {
-								minR = rpmSlice[i]
+					// 2. Расчет раскачки оборотов (RPM Jitter)
+					if hasRPM {
+						if currentRPM > 100 {
+							rpmBuffer.Push(currentRPM)
+							minR, maxR, cnt := rpmBuffer.MinMax()
+							if cnt >= 10 {
+								rpmJitter := maxR - minR
+								safeMqttPublish(rpmJitterStateTopic, 0, false, fmt.Sprintf("%.1f", rpmJitter))
+								jAnom := devAnomalyReg.IngestAndEvaluate(rpmJitterKey, rpmJitter)
+								if jAnom.IsReady {
+									safeMqttPublish(rpmJitterAnomState, 0, false, fmt.Sprintf("%.2f", jAnom.AnomalyScore))
+								}
 							}
-							if rpmSlice[i] > maxR {
-								maxR = rpmSlice[i]
-							}
+						} else {
+							rpmBuffer.Reset()
+							safeMqttPublish(rpmJitterStateTopic, 0, false, "0.0")
 						}
-						rpmJitter := maxR - minR
+					}
 
-						safeMqttPublish(fmt.Sprintf("gpu/%s/rpm_jitter/state", d.ID), 0, false, fmt.Sprintf("%.1f", rpmJitter))
-						jAnom := anomalyReg.IngestAndEvaluate(fmt.Sprintf("%s:rpm_jitter", d.ID), rpmJitter)
-						if jAnom.IsReady {
-							safeMqttPublish(fmt.Sprintf("gpu/%s/rpm_jitter/anomaly_score", d.ID), 0, false, fmt.Sprintf("%.2f", jAnom.AnomalyScore))
+					// 3. Расчет тренда скорости нагрева ОЖ (°C/ч)
+					if hasCoolantTemp {
+						if coolantTemp > 40 {
+							tempTrendBuffer.Push(coolantTemp)
+							ratePerHour := tempTrendBuffer.CalculateRatePerHour()
+							if ratePerHour < 0 {
+								ratePerHour = 0.0
+							}
+							safeMqttPublish(tempRateStateTopic, 0, false, fmt.Sprintf("%.1f", ratePerHour))
+
+							rAnom := devAnomalyReg.IngestAndEvaluate(tempRateKey, ratePerHour)
+							if rAnom.IsReady {
+								safeMqttPublish(tempRateAnomState, 0, false, fmt.Sprintf("%.2f", rAnom.AnomalyScore))
+							}
+						} else {
+							tempTrendBuffer.Reset()
+							safeMqttPublish(tempRateStateTopic, 0, false, "0.0")
 						}
 					}
 				}
 
-				// 3. Расчет тренда скорости нагрева ОЖ (°C/ч)
-				if hasCoolantTemp && coolantTemp > 40 {
-					tempTrendBuffer.Push(coolantTemp)
-					ratePerHour := tempTrendBuffer.CalculateRatePerHour()
-					safeMqttPublish(fmt.Sprintf("gpu/%s/coolant_temp_rate/state", d.ID), 0, false, fmt.Sprintf("%.1f", ratePerHour))
-
-					rAnom := anomalyReg.IngestAndEvaluate(fmt.Sprintf("%s:coolant_temp_rate", d.ID), ratePerHour)
-					if rAnom.IsReady {
-						safeMqttPublish(fmt.Sprintf("gpu/%s/coolant_temp_rate/anomaly_score", d.ID), 0, false, fmt.Sprintf("%.2f", rAnom.AnomalyScore))
+				if deviceReadError && !linkDown {
+					if time.Since(lastSuccessfulRead) > communicationTimeout {
+						log.Printf("[%s] Авария связи! Нет данных > %v. Сброс в 0.", d.Name, communicationTimeout)
+						linkDown = true
+						initializeSensorsWithZeros(d, model)
 					}
 				}
-
-				// Пауза 1.5 секунды между полными кругами опроса
-				time.Sleep(1500 * time.Millisecond)
 			}
 		}
 	}()
