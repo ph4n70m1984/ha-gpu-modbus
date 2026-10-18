@@ -94,7 +94,6 @@ const (
 
 type PreparedRegister struct {
 	Config       RegisterConfig
-	IsCoil       bool
 	ModbusType   modbus.RegType
 	IsSigned     bool
 	IsProcess    bool
@@ -1007,7 +1006,6 @@ func startDevicePolling(d UserDevice) {
 
 		prep := PreparedRegister{
 			Config:       reg,
-			IsCoil:       regTypeLower == "coil",
 			ModbusType:   mbType,
 			IsSigned:     isSignedRegister(reg),
 			IsProcess:    isProc,
@@ -1152,7 +1150,7 @@ func startDevicePolling(d UserDevice) {
 		lastSuccessfulRead := time.Now()
 		linkDown := true
 
-		ticker := time.NewTicker(2500 * time.Millisecond)
+		ticker := time.NewTicker(7 * time.Second)
 		defer ticker.Stop()
 
 		for {
@@ -1169,7 +1167,7 @@ func startDevicePolling(d UserDevice) {
 				mu.Unlock()
 				return
 
-			// Выполнение команд через изолированный однократный сеанс (Open -> Write -> Close)
+			// Изолированная запись команд
 			case cmd := <-cmdChan:
 				cmdClient, err := modbus.NewClient(&modbus.ClientConfiguration{
 					URL:     "tcp://" + d.Address,
@@ -1195,7 +1193,7 @@ func startDevicePolling(d UserDevice) {
 					}
 				}
 
-			// Циклический опрос: Open() -> опрос всех регистров -> Close() в каждом цикле
+			// Циклический сессионный опрос раз в 7 секунд
 			case <-ticker.C:
 				if mqttClient == nil || !mqttClient.IsConnected() {
 					continue
@@ -1227,7 +1225,6 @@ func startDevicePolling(d UserDevice) {
 					}
 				} else {
 					for i := range preparedRegs {
-						// Проверка выхода из горутины между регистрами
 						select {
 						case <-stopChan:
 							client.Close()
@@ -1240,17 +1237,8 @@ func startDevicePolling(d UserDevice) {
 						var val float64
 						var readErr error
 
-						if prep.IsCoil {
-							var coilVal bool
-							coilVal, readErr = client.ReadCoil(reg.Address)
-							if readErr == nil {
-								if coilVal {
-									val = 1.0
-								} else {
-									val = 0.0
-								}
-							}
-						} else if reg.Bitrate == 32 {
+						// Все чтения строго через Holding/Input регистры (без ReadCoil 01H)
+						if reg.Bitrate == 32 {
 							var raw32 []uint16
 							raw32, readErr = client.ReadRegisters(reg.Address, 2, prep.ModbusType)
 							if readErr == nil && len(raw32) == 2 {
@@ -1263,9 +1251,7 @@ func startDevicePolling(d UserDevice) {
 							var raw16 uint16
 							raw16, readErr = client.ReadRegister(reg.Address, prep.ModbusType)
 							if readErr == nil {
-								// Фильтр служебных кодов отсутствия данных SmartGen
 								if raw16 == 32766 || raw16 == 32767 {
-									time.Sleep(20 * time.Millisecond)
 									continue
 								}
 								if prep.IsSigned {
@@ -1276,10 +1262,8 @@ func startDevicePolling(d UserDevice) {
 							}
 						}
 
-						// При любой ошибке чтения отбрасываем пакет и НЕ публикуем мусор
 						if readErr != nil {
 							deviceReadError = true
-							time.Sleep(20 * time.Millisecond)
 							continue
 						}
 
@@ -1322,11 +1306,9 @@ func startDevicePolling(d UserDevice) {
 							coolantTemp = val
 							hasCoolantTemp = true
 						}
-
-						time.Sleep(20 * time.Millisecond)
 					}
 
-					// Сброс и закрытие TCP сокета после каждого круга опроса
+					// Сбрасываем сокет и очищаем буферы шлюза
 					client.Close()
 
 					// 1. Расчет перекоса токов
